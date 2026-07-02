@@ -33,9 +33,27 @@ export type AppRow = {
 
 export type Plano = { passos: { id: string; titulo: string; estado: "por_fazer" | "em_execucao" | "feito" | "falhou" }[] };
 
-export async function log(appId: string, orderId: string, userId: string, autor: "sistema" | "agente", tipo: "texto" | "erro" | "estado", text: string) {
+export async function log(appId: string, orderId: string, userId: string, autor: "sistema" | "agente", tipo: "texto" | "erro" | "estado" | "atividade" | "pensamento", text: string) {
   await supabase.from("studio_messages").insert({ app_id: appId, order_id: orderId, user_id: userId, autor, tipo, conteudo: { text } });
 }
+
+/**
+ * Studio Fatia 4b: escreve linhas no terminal integrado.
+ *
+ * seq é monotonic dentro da ordem (a UI usa para pedir só o delta desde a
+ * última). Batch para reduzir carga: podes juntar N linhas e chamar 1x.
+ * Fire-and-forget — se falhar, apenas perdemos o terminal, não a ordem.
+ */
+type RunLogStream = "stdout" | "stderr" | "tool" | "edit" | "deploy" | "info";
+const _seqByOrder = new Map<string, number>();
+export async function runlog(orderId: string, stream: RunLogStream, linha: string): Promise<void> {
+  const seq = (_seqByOrder.get(orderId) ?? 0) + 1;
+  _seqByOrder.set(orderId, seq);
+  await supabase.from("studio_runlog").insert({ order_id: orderId, seq, stream, linha }).then((r) => {
+    if (r.error) console.warn(`[${orderId.slice(0, 8)}] runlog falhou: ${r.error.message}`);
+  });
+}
+export function resetRunlogSeq(orderId: string) { _seqByOrder.delete(orderId); }
 
 export async function event(appId: string, orderId: string | null, userId: string, tipo: string, payload: Record<string, unknown> = {}) {
   await supabase.from("studio_events").insert({ app_id: appId, order_id: orderId, user_id: userId, tipo, payload });

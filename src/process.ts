@@ -17,13 +17,19 @@
  */
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { supabase, tryLock, unlock, log, event, type OrderRow, type AppRow, type Plano } from "./db.js";
+import { supabase, tryLock, unlock, log, event, runlog, resetRunlogSeq, type OrderRow, type AppRow, type Plano } from "./db.js";
 import { CONFIG } from "./config.js";
 import { cleanWorktree, shallowClone, createBranch, hasChanges, commitAll, push, diffStat } from "./git.js";
 import { runAgent } from "./agent.js";
 import { waitForPreviewDeploy } from "./vercel.js";
 
-const PASSOS = ["Preparar worktree", "Analisar & aplicar", "Commit & push", "Aguardar preview"] as const;
+// Studio Fatia 4: rótulos humanos no plano (o tecnês vive no terminal).
+const PASSOS = [
+  "A preparar um espaço de trabalho seguro",
+  "A perceber o pedido e a fazer as alterações",
+  "A guardar as alterações",
+  "A montar a pré-visualização",
+] as const;
 
 function makePlan(): Plano { return { passos: PASSOS.map((titulo, i) => ({ id: `p${i + 1}`, titulo, estado: "por_fazer" })) }; }
 function step(plano: Plano, id: string, estado: Plano["passos"][number]["estado"]) {
@@ -47,17 +53,22 @@ export async function processOrder(order: OrderRow): Promise<void> {
     return; // outra ordem está a correr; volta ao poll
   }
 
+  resetRunlogSeq(order.id);
   let plano = makePlan();
   await supabase.from("studio_orders").update({ estado: "em_execucao", plano }).eq("id", order.id);
   await event(order.app_id, order.id, order.user_id, "worker.arranque", { worker: CONFIG.WORKER_ID, modo: order.modo });
+  await runlog(order.id, "info", `worker=${CONFIG.WORKER_ID} arranque · modo=${order.modo}`);
 
   try {
     // (1) Worktree.
     plano = step(plano, "p1", "em_execucao"); await supabase.from("studio_orders").update({ plano }).eq("id", order.id);
+    await log(order.app_id, order.id, order.user_id, "agente", "atividade", "A abrir o teu projeto…");
+    await runlog(order.id, "info", `clone ${app.github_repo} → ${order.id.slice(0, 8)}`);
     const worktree = await cleanWorktree(order.id);
     await shallowClone(app.github_repo, worktree);
     const branch = `studio/${order.id.slice(0, 8)}`;
     await createBranch(worktree, branch);
+    await runlog(order.id, "stdout", `branch criada: ${branch}`);
     plano = step(plano, "p1", "feito"); await supabase.from("studio_orders").update({ plano, branch }).eq("id", order.id);
 
     // (2) Contexto do system prompt: AGENTS.md + SPEC.md (se existirem).
@@ -65,6 +76,7 @@ export async function processOrder(order: OrderRow): Promise<void> {
       readFile(path.join(worktree, "AGENTS.md"), "utf8").catch(() => ""),
       readFile(path.join(worktree, "SPEC.md"), "utf8").catch(() => ""),
     ]);
+    await runlog(order.id, "info", `contexto: AGENTS.md=${agentsMd.length}b · SPEC.md=${specMd.length}b`);
     const systemPrompt = [
       "És o worker do Studio a modificar código da app do 0-coder.",
       "Segue AGENTS.md e SPEC.md do repo. Escreve código pequeno, focado, testado quando possível.",
@@ -74,7 +86,8 @@ export async function processOrder(order: OrderRow): Promise<void> {
     ].filter(Boolean).join("\n\n");
 
     plano = step(plano, "p2", "em_execucao"); await supabase.from("studio_orders").update({ plano }).eq("id", order.id);
-    await log(order.app_id, order.id, order.user_id, "sistema", "estado", `A correr o agente (${order.modo})…`);
+    await log(order.app_id, order.id, order.user_id, "agente", "pensamento", "A perceber o pedido…");
+    await runlog(order.id, "tool", `agent.query · mode=${order.modo}`);
     const runRes = await runAgent({
       cwd: worktree,
       systemPrompt,
@@ -82,11 +95,10 @@ export async function processOrder(order: OrderRow): Promise<void> {
       mode: order.modo,
       resumeSessionId: order.session_id,
     });
+    await runlog(order.id, "info", `agent terminou · tokens=${runRes.tokensUsed} · session=${runRes.sessionId?.slice(0, 8) ?? "?"}`);
     plano = step(plano, "p2", "feito");
     await supabase.from("studio_orders").update({ plano, session_id: runRes.sessionId, tokens_usados: runRes.tokensUsed }).eq("id", order.id);
     // SaaS-0 F2: também contabiliza na quota mensal do user (RPC atómica).
-    // Fire-and-forget — se falhar, quota fica ligeiramente sub-contada; não
-    // vale a pena rebentar a ordem por isso.
     supabase.rpc("increment_user_tokens", { p_user_id: order.user_id, p_amount: runRes.tokensUsed }).then((r) => {
       if (r.error) console.warn(`[${order.id.slice(0, 8)}] quota update falhou: ${r.error.message}`);
     });
@@ -94,25 +106,31 @@ export async function processOrder(order: OrderRow): Promise<void> {
 
     // (3) Commit + push (só se houver alterações).
     plano = step(plano, "p3", "em_execucao"); await supabase.from("studio_orders").update({ plano }).eq("id", order.id);
+    await log(order.app_id, order.id, order.user_id, "agente", "atividade", "A verificar as alterações e a guardar…");
     const changed = await hasChanges(worktree);
-    if (!changed) throw new Error("agente terminou sem alterar ficheiros — nada para publicar. Reformula o pedido.");
+    if (!changed) { await runlog(order.id, "stderr", "nenhuma alteração detectada"); throw new Error("agente terminou sem alterar ficheiros — nada para publicar. Reformula o pedido."); }
     const commitMsg = `studio: ${order.texto.slice(0, 60)}${order.texto.length > 60 ? "…" : ""}\n\nordem: ${order.id}`;
     const sha = await commitAll(worktree, commitMsg);
+    await runlog(order.id, "edit", `commit ${sha.slice(0, 7)} · ${commitMsg.split("\n")[0]}`);
     await push(worktree, branch);
+    await runlog(order.id, "stdout", `push origin ${branch} · ok`);
     const stat = await diffStat(worktree);
+    await runlog(order.id, "stdout", stat.replace(/\n/g, " · "));
     plano = step(plano, "p3", "feito");
     await supabase.from("studio_orders").update({ plano, commit_sha: sha, diff_resumo: stat }).eq("id", order.id);
     await event(order.app_id, order.id, order.user_id, "worker.commit", { sha, branch, stat });
 
     // (4) Aguarda deploy Vercel READY.
     plano = step(plano, "p4", "em_execucao"); await supabase.from("studio_orders").update({ plano }).eq("id", order.id);
-    await log(order.app_id, order.id, order.user_id, "sistema", "estado", `A aguardar deploy Vercel READY…`);
+    await log(order.app_id, order.id, order.user_id, "agente", "atividade", "A esperar que a pré-visualização fique pronta…");
+    await runlog(order.id, "deploy", `poll vercel · project=${app.vercel_project_id} · branch=${branch}`);
     const deploy = await waitForPreviewDeploy(app.vercel_project_id, branch);
+    await runlog(order.id, "deploy", `READY · ${deploy.url}`);
     plano = step(plano, "p4", "feito");
     await supabase.from("studio_orders").update({
       plano, preview_url: deploy.url, preview_deploy_id: deploy.deployId, estado: "preview_pronto",
     }).eq("id", order.id);
-    await log(order.app_id, order.id, order.user_id, "agente", "texto", `✓ Preview pronto: ${deploy.url}`);
+    await log(order.app_id, order.id, order.user_id, "agente", "texto", `✓ Pré-visualização pronta.`);
     await event(order.app_id, order.id, order.user_id, "worker.preview_pronto", { url: deploy.url, ms: Date.now() - t0 });
 
     console.log(`[${order.id.slice(0, 8)}] preview_pronto em ${Date.now() - t0}ms · ${deploy.url}`);
@@ -128,6 +146,7 @@ async function fail(order: OrderRow, motivo: string) {
   console.error(`[${order.id.slice(0, 8)}] falhou: ${motivo}`);
   await supabase.from("studio_orders").update({ estado: "falhou", erro: motivo }).eq("id", order.id);
   await log(order.app_id, order.id, order.user_id, "sistema", "erro", motivo);
+  await runlog(order.id, "stderr", `falhou: ${motivo}`);
   await event(order.app_id, order.id, order.user_id, "worker.falhou", { motivo });
 }
 
