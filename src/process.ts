@@ -84,6 +84,12 @@ export async function processOrder(order: OrderRow): Promise<void> {
     });
     plano = step(plano, "p2", "feito");
     await supabase.from("studio_orders").update({ plano, session_id: runRes.sessionId, tokens_usados: runRes.tokensUsed }).eq("id", order.id);
+    // SaaS-0 F2: também contabiliza na quota mensal do user (RPC atómica).
+    // Fire-and-forget — se falhar, quota fica ligeiramente sub-contada; não
+    // vale a pena rebentar a ordem por isso.
+    supabase.rpc("increment_user_tokens", { p_user_id: order.user_id, p_amount: runRes.tokensUsed }).then((r) => {
+      if (r.error) console.warn(`[${order.id.slice(0, 8)}] quota update falhou: ${r.error.message}`);
+    });
     if (runRes.finalText) await log(order.app_id, order.id, order.user_id, "agente", "texto", runRes.finalText);
 
     // (3) Commit + push (só se houver alterações).
