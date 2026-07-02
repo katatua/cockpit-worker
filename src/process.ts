@@ -103,6 +103,30 @@ export async function processOrder(order: OrderRow): Promise<void> {
 
       // --- (3) Runs agent ---
       plano = step(plano, "p2", "em_execucao"); await supabase.from("studio_orders").update({ plano }).eq("id", order.id);
+
+      // Brief §4.5 · shortcut de revert: se o texto arranca com [REVERT commit_sha=...]
+      // fazemos `git revert --no-edit <sha>` directamente (sem correr o agente,
+      // determinístico). Nunca reescreve histórico — cria commit novo.
+      const revertMatch = /^\[REVERT commit_sha=([0-9a-f]{7,40})\]/i.exec(order.texto);
+      if (revertMatch) {
+        const targetSha = revertMatch[1];
+        await log(order.app_id, order.id, order.user_id, "agente", "atividade", `A voltar ao estado guardado…`);
+        await runlog(order.id, "info", `revert target=${targetSha}`);
+        const { runCmd } = await import("./git.js");
+        try {
+          await runCmd("git", ["-C", worktree, "revert", "--no-edit", targetSha]);
+          await runlog(order.id, "edit", `git revert ${targetSha.slice(0, 7)} · ok`);
+        } catch (e) {
+          await runlog(order.id, "stderr", `revert falhou: ${e instanceof Error ? e.message : String(e)}`);
+          throw new Error(`não consegui voltar a essa versão: ${e instanceof Error ? e.message : String(e)}`);
+        }
+        // Salta o agente: já temos as alterações do revert; vai directo ao commit+push+quality.
+        plano = step(plano, "p2", "feito");
+        await supabase.from("studio_orders").update({ plano }).eq("id", order.id);
+        // Não incrementa tokens (revert é determinístico, sem LLM).
+        // Continua para (4) commit+push
+        // (usa um bloco separado — see abaixo)
+      } else {
       const guidance = iter === 1 ? "" : estrategiaGuidance(currentEstrategia);
       const errCtx = lastError ? `\n\n[nota interna: iteração anterior falhou com "${lastError.slice(0, 200)}" — corrige]` : "";
       const userPrompt = guidance ? `${guidance}\n\n${order.texto}${errCtx}` : `${order.texto}${errCtx}`;
@@ -129,6 +153,7 @@ export async function processOrder(order: OrderRow): Promise<void> {
         if (r.error) console.warn(`[${order.id.slice(0, 8)}] quota update falhou: ${r.error.message}`);
       });
       if (runRes.finalText && iter === 1) await log(order.app_id, order.id, order.user_id, "agente", "texto", runRes.finalText);
+      } // fim do else — só corre agente se NÃO for revert
 
       // --- (4) Commit + push ---
       plano = step(plano, "p3", "em_execucao"); await supabase.from("studio_orders").update({ plano }).eq("id", order.id);

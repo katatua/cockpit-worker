@@ -31,13 +31,21 @@ process.on("SIGINT", () => shutdown("SIGINT"));
  * Prioridade por FIFO absoluto (created_at ASC, sem preferência de estado).
  */
 async function nextOrder(): Promise<OrderRow | null> {
-  const { data, error } = await supabase
+  // Ordens de campanha bloqueada não devem ser apanhadas.
+  const { data: bloqueadas } = await supabase.from("studio_campaigns").select("id").eq("estado", "bloqueada");
+  const idsBloqueadas = ((bloqueadas ?? []) as { id: string }[]).map((c) => c.id);
+
+  let q = supabase
     .from("studio_orders")
     .select("id, user_id, app_id, texto, modo, estado, session_id, tokens_usados")
     .in("estado", ["rascunho", "em_fila"])
     .order("created_at", { ascending: true })
-    .limit(1)
-    .maybeSingle();
+    .limit(1);
+  if (idsBloqueadas.length > 0) {
+    // exclude campaign_id in list (postgrest: "not.in")
+    q = q.or(`campaign_id.is.null,campaign_id.not.in.(${idsBloqueadas.join(",")})`);
+  }
+  const { data, error } = await q.maybeSingle();
   if (error) { console.error("poll erro:", error.message); return null; }
   return data as OrderRow | null;
 }

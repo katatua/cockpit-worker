@@ -56,3 +56,6 @@ export async function push(dir: string, branch: string): Promise<void> {
 export async function diffStat(dir: string): Promise<string> {
   return (await run("git", ["diff", "--stat", "HEAD~1..HEAD"], { cwd: dir })).trim();
 }
+
+/** Exposto para o revert directo em process.ts. */
+export const runCmd = run;

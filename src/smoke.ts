@@ -32,12 +32,32 @@ const EXECUTABLE_PATH = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "/usr
 const TIMEOUT_MS = 30_000;
 const MAX_BOTOES = 10;
 
-/** Preenche um input com dados sintéticos apropriados ao tipo. */
+/**
+ * Preenche um input com dados sintéticos apropriados ao tipo.
+ * Uploads: usa `setInputFiles` com um buffer sintético (PNG 1×1 ou TXT curto).
+ */
 async function fillInput(input: import("playwright-core").Locator): Promise<void> {
   const type = (await input.getAttribute("type").catch(() => "")) || "text";
   const name = (await input.getAttribute("name").catch(() => "")) || "";
   const placeholder = (await input.getAttribute("placeholder").catch(() => "")) || "";
+  const accept = (await input.getAttribute("accept").catch(() => "")) || "";
   const hint = `${name} ${placeholder}`.toLowerCase();
+
+  if (type === "file") {
+    // Escolhe formato sintético apropriado ao `accept`.
+    const wantsImage = /image/i.test(accept) || /foto|imagem|avatar|logo/.test(hint);
+    if (wantsImage) {
+      // PNG 1×1 transparente (67 bytes)
+      const buf = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c62000000000005000103a5cfa2fc0000000049454e44ae426082", "hex");
+      return input.setInputFiles({ name: "teste.png", mimeType: "image/png", buffer: buf }).catch(() => {});
+    }
+    if (/pdf/i.test(accept)) {
+      const buf = Buffer.from("%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[]/Count 0>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF");
+      return input.setInputFiles({ name: "teste.pdf", mimeType: "application/pdf", buffer: buf }).catch(() => {});
+    }
+    // Default: TXT curto
+    return input.setInputFiles({ name: "teste.txt", mimeType: "text/plain", buffer: Buffer.from("teste smoke automatico\n") }).catch(() => {});
+  }
 
   if (type === "email" || /email/.test(hint)) return input.fill("teste@myvibepro.dev");
   if (type === "url" || /site|url|link/.test(hint)) return input.fill("https://exemplo.pt");
@@ -46,7 +66,6 @@ async function fillInput(input: import("playwright-core").Locator): Promise<void
   if (type === "date") return input.fill("2026-12-01");
   if (type === "password") return input.fill("Teste1234!");
   if (type === "checkbox" || type === "radio") return input.check().catch(() => {});
-  // Textarea + text default
   return input.fill(/nome/.test(hint) ? "Utilizador Teste" : /msg|mensagem|comentar/.test(hint) ? "Teste smoke automático." : "teste");
 }
 
@@ -91,8 +110,8 @@ export async function smokeTest(previewUrl: string): Promise<SmokeReport> {
       const form = forms[i];
       const formLabel = `form${i}`;
       try {
-        // Preenche inputs (não hidden)
-        const inputs = await form.locator("input:visible, textarea:visible, select:visible").all();
+        // Preenche inputs (não hidden). File inputs também são apanhados por fillInput.
+        const inputs = await form.locator("input:visible, input[type=file], textarea:visible, select:visible").all();
         for (const input of inputs) {
           const tag = await input.evaluate((el) => el.tagName.toLowerCase()).catch(() => "input");
           if (tag === "select") {
