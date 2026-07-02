@@ -52,17 +52,34 @@ async function interpretRascunho(order: OrderRow): Promise<void> {
   try {
     const result = await interpret(order.texto, process.env.ANTHROPIC_API_KEY!);
     if (result.kind === "conversa") {
-      // Conversa direta: responde e fecha (nada para executar).
       await log(order.app_id, order.id, order.user_id, "agente", "texto", result.resposta ?? "");
       await supabase.from("studio_orders").update({
         estado: "cancelado", intencao: result.intencao || null, tokens_usados: result.tokensUsed,
       }).eq("id", order.id);
       await event(order.app_id, order.id, order.user_id, "order.conversa", { tokensUsed: result.tokensUsed });
-      // Regista tokens na quota (fire-and-forget).
       supabase.rpc("increment_user_tokens", { p_user_id: order.user_id, p_amount: result.tokensUsed }).then(() => {});
       return;
     }
-    // Trabalho: escreve intenção + card "confirmacao" + espera confirmação.
+
+    // Brief §4.8 roteamento app-nova: o pedido é obviamente uma app diferente.
+    // Não recusa — regista intenção com propostinha de nome. A UI mostra o card
+    // "Vou criar uma app nova (X). Avanço?" e o cockpit encaminha para o
+    // Scaffolder no confirm(). O 0-coder nunca vê "reformula o pedido".
+    if (result.kind === "app_nova") {
+      const intencaoComRota = result.intencao + (result.nomeAppSugerido ? `\n\nNome sugerido: ${result.nomeAppSugerido}` : "");
+      await supabase.from("studio_orders").update({
+        estado: "aguarda_confirmacao", intencao: intencaoComRota, tokens_usados: result.tokensUsed,
+      }).eq("id", order.id);
+      await supabase.from("studio_messages").insert({
+        app_id: order.app_id, order_id: order.id, user_id: order.user_id,
+        autor: "agente", tipo: "confirmacao", conteudo: { text: intencaoComRota, kind: "app_nova", nome: result.nomeAppSugerido },
+      });
+      await event(order.app_id, order.id, order.user_id, "order.app_nova", { intencao: result.intencao, nome: result.nomeAppSugerido });
+      supabase.rpc("increment_user_tokens", { p_user_id: order.user_id, p_amount: result.tokensUsed }).then(() => {});
+      return;
+    }
+
+    // Trabalho normal: escreve intenção + card "confirmacao".
     await supabase.from("studio_orders").update({
       estado: "aguarda_confirmacao", intencao: result.intencao, tokens_usados: result.tokensUsed,
     }).eq("id", order.id);

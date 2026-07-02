@@ -16,31 +16,35 @@
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 
 export type InterpretResult = {
-  kind: "trabalho" | "conversa";
+  kind: "trabalho" | "conversa" | "app_nova";
   intencao: string; // "Vou <verbo> <objeto> <detalhes>."
   resposta?: string; // Se conversa, a resposta direta.
+  nomeAppSugerido?: string; // Se app_nova, o nome que o agente propõe
   tokensUsed: number;
 };
 
 const SYSTEM_PROMPT = `És o interpretador de pedidos do Studio (uma app tipo Lovable).
 O utilizador escreve como fala — pode ser vago ou incompleto. A tua função é:
 
-1. Classificar: 'conversa' (pergunta ou comentário sem trabalho) ou 'trabalho' (quer mudar/criar algo na app).
+1. Classificar em UM de três:
+   - 'conversa': pergunta ou comentário sem trabalho
+   - 'trabalho': quer mudar/adicionar algo na app ATUAL
+   - 'app_nova': o pedido é obviamente uma app diferente (não uma mudança na atual)
 2. Se 'trabalho': dizer em UMA frase o que vais fazer, em humano.
+3. Se 'app_nova': propor um nome curto (2-4 palavras) e dizer o que a app faz.
 
 Regras rígidas:
 - ZERO tecnês: sem "commit", "deploy", "branch", "build", "componente", "framework", "CSS", "React", "Next.js", "worktree", "PR", "merge".
 - Sê concreto. Se algo é vago, decide tu — nunca perguntas ao utilizador.
-- Se falta informação, assume a interpretação mais razoável e regista em DECISIONS depois.
 - Frase começa por "Vou " e não acaba em interrogação.
 - Máximo ~25 palavras.
 
 Exemplos:
-- User: "quero uma lista de tarefas" → { "kind": "trabalho", "intencao": "Vou criar uma lista de tarefas onde podes adicionar, marcar como feitas e apagar." }
 - User: "muda o título para Olá" → { "kind": "trabalho", "intencao": "Vou mudar o título principal para 'Olá'." }
+- User: "quero uma lista de tarefas" (numa app site-hello) → { "kind": "app_nova", "nomeAppSugerido": "Lista de tarefas", "intencao": "Vou criar uma app nova (Lista de tarefas) onde podes adicionar, marcar como feitas e apagar." }
 - User: "quantas apps posso ter?" → { "kind": "conversa", "resposta": "Podes ter até 5 apps no plano Free e 20 no Pro." }
 
-Responde SÓ com JSON válido no formato { "kind": "trabalho"|"conversa", "intencao": "...", "resposta": "..." }.`;
+Responde SÓ com JSON válido no formato { "kind": "trabalho"|"conversa"|"app_nova", "intencao"?: "...", "resposta"?: "...", "nomeAppSugerido"?: "..." }.`;
 
 export async function interpret(texto: string, apiKey: string): Promise<InterpretResult> {
   const body = {
@@ -63,17 +67,19 @@ export async function interpret(texto: string, apiKey: string): Promise<Interpre
   const textBlock = j.content.find((c) => c.type === "text");
   if (!textBlock) throw new Error("interpret: sem text block na resposta");
 
-  let parsed: { kind: string; intencao?: string; resposta?: string };
+  let parsed: { kind: string; intencao?: string; resposta?: string; nomeAppSugerido?: string };
   try { parsed = JSON.parse(textBlock.text); } catch {
-    // fallback: usa a resposta como intenção literal se JSON falhar
     parsed = { kind: "trabalho", intencao: textBlock.text.slice(0, 200) };
   }
-  const kind = parsed.kind === "conversa" ? "conversa" : "trabalho";
-  const intencao = parsed.intencao ?? (kind === "trabalho" ? `Vou tratar de: ${texto.slice(0, 80)}.` : "");
+  const kind = parsed.kind === "conversa" ? "conversa"
+    : parsed.kind === "app_nova" ? "app_nova"
+    : "trabalho";
+  const intencao = parsed.intencao ?? (kind !== "conversa" ? `Vou tratar de: ${texto.slice(0, 80)}.` : "");
   return {
     kind,
     intencao,
     resposta: parsed.resposta,
+    nomeAppSugerido: parsed.nomeAppSugerido,
     tokensUsed: (j.usage.input_tokens ?? 0) + (j.usage.output_tokens ?? 0),
   };
 }
