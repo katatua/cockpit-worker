@@ -1,11 +1,11 @@
-# Studio worker · Fly.io config
+# Studio worker · Fly.io config (Fatia 3b: agora com HTTP router)
 #
-# Background daemon (SEM http_service). Uma máquina persistente na região cdg,
-# a fazer poll a studio_orders. NÃO abre porta HTTP.
+# O worker é DAEMON de background (poll a studio_orders) MAS também expõe um
+# router HTTP na porta 8080 para servir os previews inline (Fatia 3). O
+# mesmo processo Node faz as duas coisas em paralelo.
 #
-# ⚠️ NÃO adicionar [http_service] — se adicionares, o Fly assume web app
-# e faz auto-stop das máquinas por não haver tráfego HTTP na porta 3000.
-# O sintoma disso é máquinas encravadas em "Configuring firecracker".
+# ⚠️ NÃO adicionar `auto_stop_machines='stop'` — mata o daemon quando não há
+# tráfego HTTP. Queremos a máquina sempre ligada (o poll não é HTTP).
 
 app = 'cockpit-worker-79fnmw'
 primary_region = 'cdg'
@@ -18,9 +18,24 @@ primary_region = 'cdg'
 [processes]
   app = 'node dist/index.js'
 
+# Volume persistente para /data — cache de node_modules por app (~500MB cada).
+# Sem isto cada preview reinstala e queima disco efémero da máquina.
+[mounts]
+  source = 'data'
+  destination = '/data'
+
+# HTTP router: expõe internal_port 8080 (o preview-router.ts do worker).
+# auto_stop_machines='off' garantido pela ausência da flag — Fly usa 'off' por default.
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ['app']
+
 [[vm]]
   size = 'shared-cpu-1x'
-  memory = '512mb'
+  memory = '1gb'          # +512MB → 1GB (dev servers precisam)
   cpu_kind = 'shared'
   cpus = 1
-  memory_mb = 512
+  memory_mb = 1024

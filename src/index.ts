@@ -8,6 +8,8 @@
 import { supabase, type OrderRow } from "./db.js";
 import { processOrder } from "./process.js";
 import { CONFIG } from "./config.js";
+import { startRouter } from "./preview-router.js";
+import { sweepIdle } from "./preview-manager.js";
 
 let running = true;
 let inflight = false;
@@ -37,6 +39,12 @@ async function nextOrder(): Promise<OrderRow | null> {
 console.log(`Cockpit Studio Worker · ${CONFIG.WORKER_ID}`);
 console.log(`Supabase: ${CONFIG.SUPABASE_URL}`);
 console.log(`Poll a cada ${CONFIG.POLL_INTERVAL_S}s · orçamento max ${CONFIG.MAX_TOKENS_PER_ORDER} tokens/ordem`);
+
+// Fatia 3b/3c: arranca o router HTTP em paralelo ao poll loop, no mesmo processo Node.
+// A porta 8080 fica exposta pelo Fly [http_service]. Idle sweeper mata dev servers
+// sem tráfego há mais de 20 min.
+startRouter(8080);
+setInterval(sweepIdle, 60_000);
 
 while (running) {
   try {

@@ -1,0 +1,200 @@
+/**
+ * Studio Fatia 3c · gestor de dev servers por app.
+ *
+ * Cada app tem UM dev server persistente na sua porta (3001+). Início lazy:
+ * spawn na primeira request `/preview/:slug/*`. Idle-timeout desliga após
+ * 20 min sem tráfego (poupa CPU + memória).
+ *
+ * Persistência de disco:
+ *   /data/apps/<slug>/           ← worktree (git clone da main)
+ *     .next/, node_modules/       ← preservados entre reboots (Fly volume)
+ *
+ * A branch usada é sempre `main` (após o publish gate). Para preview de uma
+ * ordem em specifico, o iframe usa o Vercel preview URL — este dev server
+ * mostra o estado publicado, que é o padrão do Lovable ("o que está deployado
+ * agora"). Hot-reload real para ordens em construção fica para Fatia 3d.
+ */
+
+import { spawn, type ChildProcess } from "node:child_process";
+import { mkdir, access } from "node:fs/promises";
+import { join } from "node:path";
+import { supabase } from "./db.js";
+import { authedRepoUrl, cleanWorktree } from "./git.js";
+import { spawnPromise } from "./spawn-helpers.js";
+
+const APPS_ROOT = "/data/apps";
+const PORT_START = 3001;
+const PORT_END = 3099;
+const IDLE_TIMEOUT_MS = 20 * 60 * 1000; // 20 min
+
+type PreviewProc = {
+  slug: string;
+  appId: string;
+  port: number;
+  proc: ChildProcess;
+  startedAt: number;
+  lastActive: number;
+  ready: boolean;
+  readyPromise: Promise<void>;
+};
+
+const running = new Map<string, PreviewProc>();
+const usedPorts = new Set<number>();
+
+function nextPort(): number {
+  for (let p = PORT_START; p <= PORT_END; p++) {
+    if (!usedPorts.has(p)) return p;
+  }
+  throw new Error("preview: sem portas disponíveis");
+}
+
+/**
+ * Devolve a porta interna do dev server para este slug — arranca-o se ainda
+ * não está a correr, espera que fique READY. Marca lastActive.
+ */
+export async function ensurePreview(slug: string): Promise<{ port: number; ready: boolean }> {
+  const existing = running.get(slug);
+  if (existing) {
+    existing.lastActive = Date.now();
+    if (!existing.ready) {
+      try { await existing.readyPromise; } catch { /* proc falhou; deixa cair para spawn de novo */ }
+    }
+    if (existing.ready) return { port: existing.port, ready: true };
+    // Se falhou, limpa e re-spawna.
+    stop(slug);
+  }
+  return spawnPreview(slug);
+}
+
+async function spawnPreview(slug: string): Promise<{ port: number; ready: boolean }> {
+  const app = await loadApp(slug);
+  if (!app) throw new Error(`preview: app ${slug} não existe`);
+  if (!app.github_repo) throw new Error(`preview: ${slug} sem github_repo`);
+
+  const port = nextPort();
+  usedPorts.add(port);
+  await updateStatus(app.id, "a_arrancar", port);
+
+  const dir = join(APPS_ROOT, slug);
+  await mkdir(dir, { recursive: true });
+
+  const alreadyCloned = await access(join(dir, ".git")).then(() => true).catch(() => false);
+
+  console.log(`[preview:${slug}] a arrancar em porta ${port} · ${alreadyCloned ? "pull" : "clone"} de ${app.github_repo}`);
+  try {
+    if (alreadyCloned) {
+      await spawnPromise("git", ["-C", dir, "fetch", "--depth", "1", "origin", "main"]);
+      await spawnPromise("git", ["-C", dir, "reset", "--hard", "origin/main"]);
+    } else {
+      await cleanWorktree(""); // no-op para tmp — só garante que o path base existe
+      await spawnPromise("git", ["clone", "--depth", "1", authedRepoUrl(app.github_repo), dir]);
+    }
+    // Install deps (idempotente — npm ci usa lockfile; senão npm install).
+    const hasLock = await access(join(dir, "package-lock.json")).then(() => true).catch(() => false);
+    await spawnPromise(hasLock ? "npm" : "npm", hasLock ? ["ci", "--no-audit", "--no-fund"] : ["install", "--no-audit", "--no-fund"], { cwd: dir });
+  } catch (e) {
+    usedPorts.delete(port);
+    await updateStatus(app.id, "erro", null, e instanceof Error ? e.message : String(e));
+    throw e;
+  }
+
+  // Spawn `next dev` — usa `npm run dev` para respeitar scripts do repo.
+  const proc = spawn("npm", ["run", "dev", "--", "--port", String(port), "--hostname", "0.0.0.0"], {
+    cwd: dir,
+    env: { ...process.env, PORT: String(port), NODE_ENV: "development" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  let resolveReady: () => void;
+  let rejectReady: (e: Error) => void;
+  const readyPromise = new Promise<void>((res, rej) => { resolveReady = res; rejectReady = rej; });
+  const rec: PreviewProc = { slug, appId: app.id, port, proc, startedAt: Date.now(), lastActive: Date.now(), ready: false, readyPromise };
+  running.set(slug, rec);
+
+  // Deteta "Ready" na stdout do Next para saber que aceita conexões.
+  proc.stdout?.on("data", (chunk: Buffer) => {
+    const s = chunk.toString();
+    if (!rec.ready && (/Ready in/.test(s) || /Local:\s+http/.test(s))) {
+      rec.ready = true;
+      updateStatus(app.id, "ativo", port).catch(() => {});
+      console.log(`[preview:${slug}] READY (porta ${port})`);
+      resolveReady();
+    }
+  });
+  proc.stderr?.on("data", (chunk: Buffer) => {
+    const s = chunk.toString();
+    // Alguns builds do Next imprimem "Ready" em stderr — apanha na mesma.
+    if (!rec.ready && /Ready in/.test(s)) {
+      rec.ready = true;
+      updateStatus(app.id, "ativo", port).catch(() => {});
+      resolveReady();
+    }
+  });
+  proc.on("exit", (code) => {
+    console.log(`[preview:${slug}] exit code=${code}`);
+    running.delete(slug);
+    usedPorts.delete(port);
+    updateStatus(app.id, "parado", null).catch(() => {});
+    if (!rec.ready) rejectReady(new Error(`dev server saiu com code=${code} antes de READY`));
+  });
+
+  // Timeout de 90s para READY.
+  const readyTimeout = new Promise<void>((_, rej) => setTimeout(() => rej(new Error("timeout à espera de READY (90s)")), 90000));
+  try {
+    await Promise.race([readyPromise, readyTimeout]);
+  } catch (e) {
+    stop(slug);
+    throw e;
+  }
+
+  return { port, ready: true };
+}
+
+export function stop(slug: string): void {
+  const rec = running.get(slug);
+  if (!rec) return;
+  console.log(`[preview:${slug}] a parar`);
+  try { rec.proc.kill("SIGTERM"); } catch { /* já morreu */ }
+  running.delete(slug);
+  usedPorts.delete(rec.port);
+  updateStatus(rec.appId, "parado", null).catch(() => {});
+}
+
+export function touch(slug: string): void {
+  const rec = running.get(slug);
+  if (rec) rec.lastActive = Date.now();
+}
+
+/** Devolve porta se dev server para esse slug está ready — usado pelo router. */
+export function portOf(slug: string): number | null {
+  const rec = running.get(slug);
+  return rec?.ready ? rec.port : null;
+}
+
+/** Idle sweeper — corre a cada 60s no index.ts. */
+export function sweepIdle(): void {
+  const now = Date.now();
+  for (const [slug, rec] of running) {
+    if (now - rec.lastActive > IDLE_TIMEOUT_MS) {
+      console.log(`[preview:${slug}] idle > 20min · parar`);
+      stop(slug);
+    }
+  }
+}
+
+async function loadApp(slug: string): Promise<{ id: string; github_repo: string | null } | null> {
+  const { data } = await supabase.from("studio_apps").select("id, github_repo").eq("slug", slug).maybeSingle();
+  return data as { id: string; github_repo: string | null } | null;
+}
+
+async function updateStatus(appId: string, status: string, porta: number | null, erro: string | null = null): Promise<void> {
+  await supabase.from("studio_previews").upsert({
+    app_id: appId,
+    status,
+    porta,
+    url: porta ? `http://127.0.0.1:${porta}` : null,
+    erro,
+    last_active: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  }, { onConflict: "app_id" });
+}
