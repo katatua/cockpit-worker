@@ -22,6 +22,8 @@ import { waitForPreviewDeploy } from "./vercel.js";
 import { checkQuality } from "./quality.js";
 import { smokeTest } from "./smoke.js";
 import { nextEstrategia, estrategiaGuidance, esgotadaHumana, type Estrategia } from "./loop-detector.js";
+import { discoverRoutes } from "./routes-scanner.js";
+import { scheduleNextRound } from "./campaign-sweep.js";
 
 const MAX_ITER = 8; // safety net anti-runaway
 
@@ -184,13 +186,18 @@ export async function processOrder(order: OrderRow): Promise<void> {
         return null;
       });
       if (smoke) {
-        await runlog(order.id, "info", `smoke: ${smoke.botoesTestados} botões, ${smoke.consoleErros.length} erros consola, ${smoke.navegacoes} navegações (${smoke.duracaoMs}ms)`);
+        await runlog(order.id, "info", `smoke: ${smoke.botoesTestados} botões, ${smoke.formulariosTestados} forms, ${smoke.consoleErros.length} erros consola, ${smoke.navegacoes} navegações (${smoke.duracaoMs}ms)`);
         for (const err of smoke.consoleErros.slice(0, 5)) await runlog(order.id, "stderr", `console: ${err}`);
         for (const b of smoke.botoesQuebrados.slice(0, 5)) await runlog(order.id, "stderr", `botão quebrado: ${b.seletor} · ${b.motivo}`);
+        for (const f of smoke.formulariosQuebrados.slice(0, 5)) await runlog(order.id, "stderr", `form quebrado: ${f.seletor} · ${f.motivo}`);
         if (!smoke.ok) {
-          lastError = `smoke falhou: ${smoke.consoleErros.length} erros consola + ${smoke.botoesQuebrados.length} botões quebrados`;
-          const resumo = smoke.botoesQuebrados.length > 0
-            ? `${smoke.botoesQuebrados.length} botões não responderam. Vou tentar corrigir.`
+          const partes = [];
+          if (smoke.botoesQuebrados.length > 0) partes.push(`${smoke.botoesQuebrados.length} botões`);
+          if (smoke.formulariosQuebrados.length > 0) partes.push(`${smoke.formulariosQuebrados.length} forms`);
+          if (smoke.consoleErros.length > 0) partes.push(`${smoke.consoleErros.length} erros consola`);
+          lastError = `smoke falhou: ${partes.join(" + ")}`;
+          const resumo = partes.length > 0
+            ? `${partes.join(" + ")} não funcionam bem. Vou tentar corrigir.`
             : `A app está a dar erros. Vou tentar corrigir.`;
           await log(order.app_id, order.id, order.user_id, "agente", "erro_humano", resumo);
           const nx = await nextEstrategia(order.id, lastError);
@@ -202,6 +209,13 @@ export async function processOrder(order: OrderRow): Promise<void> {
 
       // --- (7) Sucesso ---
       plano = step(plano, "p4", "feito");
+
+      // Brief §4.1: descobre rotas do repo e escreve em studio_apps.rotas
+      // para o dropdown do preview toolbar ficar dinâmico.
+      const rotas = await discoverRoutes(worktree).catch(() => ["/"]);
+      await supabase.from("studio_apps").update({ rotas }).eq("id", app.id);
+      await runlog(order.id, "info", `rotas descobertas: ${rotas.join(", ")}`);
+
       await supabase.from("studio_orders").update({
         plano, preview_url: deploy.url, preview_deploy_id: deploy.deployId, estado: "preview_pronto",
       }).eq("id", order.id);
@@ -237,10 +251,28 @@ export async function processOrder(order: OrderRow): Promise<void> {
             });
             await event(order.app_id, null, order.user_id, "campanha.wp_seguinte", { campaign_id: campaignId, wp_id: seguinte.id });
           } else {
-            // Todos os WPs feitos → varrer/concluir. MVP: marca concluida.
-            // FLAG: fatia seguinte adiciona 'a_varrer' + gaps + nova ronda.
-            await supabase.from("studio_campaigns").update({ estado: "concluida" }).eq("id", campaignId);
-            await event(order.app_id, null, order.user_id, "campanha.concluida", { campaign_id: campaignId });
+            // Todos os WPs feitos → sweep da spec para ver se restam gaps.
+            await supabase.from("studio_campaigns").update({ estado: "a_varrer" }).eq("id", campaignId);
+            await event(order.app_id, null, order.user_id, "campanha.a_varrer", { campaign_id: campaignId });
+            try {
+              const sweep = await scheduleNextRound(campaignId, order.app_id, order.user_id, worktree, CONFIG.ANTHROPIC_API_KEY);
+              if (sweep.campaign_id) {
+                await event(order.app_id, null, order.user_id, "campanha.nova_ronda", {
+                  campaign_id_antiga: campaignId, campaign_id_nova: sweep.campaign_id,
+                  items: sweep.items, tokensUsedSweep: sweep.tokensUsed,
+                });
+                // A campanha antiga fica marcada como concluida (a nova toma o testemunho)
+                await supabase.from("studio_campaigns").update({ estado: "concluida" }).eq("id", campaignId);
+              } else {
+                await supabase.from("studio_campaigns").update({ estado: "concluida" }).eq("id", campaignId);
+                await event(order.app_id, null, order.user_id, "campanha.concluida", {
+                  campaign_id: campaignId, items: sweep.items, tokensUsedSweep: sweep.tokensUsed,
+                });
+              }
+            } catch (e) {
+              await supabase.from("studio_campaigns").update({ estado: "concluida" }).eq("id", campaignId);
+              await event(order.app_id, null, order.user_id, "campanha.sweep_erro", { campaign_id: campaignId, motivo: e instanceof Error ? e.message : String(e) });
+            }
           }
         }
       }
