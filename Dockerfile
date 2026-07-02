@@ -18,5 +18,9 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
 # Nome+email do git para os commits que o agente faz.
-RUN git config --global user.email "worker@myvibepro.dev" && git config --global user.name "Cockpit Studio Worker"
+# IMPORTANTE: email TEM de ser reconhecido pelo GitHub como pertencente a um user real,
+# senão o Vercel bloqueia deploy com COMMIT_AUTHOR_REQUIRED. Usar o email primary do
+# GitHub user 'katatua' (o dono actual da conta). Quando SaaS-0 chegar (OAuth por
+# user), este ficará dinâmico via env var GIT_AUTHOR_EMAIL do secret do user.
+RUN git config --global user.email "gravitnomad@gmail.com" && git config --global user.name "katatua"
 CMD ["node", "dist/index.js"]
