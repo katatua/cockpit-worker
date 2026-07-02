@@ -94,12 +94,11 @@ async function interpretRascunho(order: OrderRow): Promise<void> {
     const upd = await supabase.from("studio_orders").update({
       estado: "aguarda_confirmacao", intencao: result.intencao, tokens_usados: result.tokensUsed,
     }).eq("id", order.id);
-    if (upd.error) { console.error(`[${order.id.slice(0, 8)}] UPDATE erro:`, upd.error.message); throw upd.error; }
-    const ins = await supabase.from("studio_messages").insert({
+    if (upd.error) throw upd.error;
+    await supabase.from("studio_messages").insert({
       app_id: order.app_id, order_id: order.id, user_id: order.user_id,
       autor: "agente", tipo: "confirmacao", conteudo: { text: result.intencao },
     });
-    if (ins.error) console.error(`[${order.id.slice(0, 8)}] INSERT msg erro:`, ins.error.message);
     await event(order.app_id, order.id, order.user_id, "order.intencao", { intencao: result.intencao, tokensUsed: result.tokensUsed });
     supabase.rpc("increment_user_tokens", { p_user_id: order.user_id, p_amount: result.tokensUsed }).then(() => {});
   } catch (e) {

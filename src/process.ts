@@ -322,15 +322,18 @@ export async function processOrder(order: OrderRow): Promise<void> {
 
 async function fail(order: OrderRow, motivo: string) {
   console.error(`[${order.id.slice(0, 8)}] falhou: ${motivo}`);
-  await supabase.from("studio_orders").update({ estado: "falhou", erro: motivo }).eq("id", order.id);
   // Traduz mensagens técnicas para humano quando dá para reconhecer.
   const humano = motivo.startsWith("Tentei várias abordagens") ? motivo
-    : /aborted by user|demorou muito/i.test(motivo) ? "A demorar demasiado — parei para não gastar mais. Tenta reformular ou dividir em pedaços menores."
-    : /nada para publicar/i.test(motivo) ? "Não consegui perceber que alterações fazer. Reformula o pedido de forma mais concreta."
+    : /aborted by user|demorou muito|timeout/i.test(motivo) ? "A demorar demasiado — parei para não gastar mais. Tenta reformular o pedido ou dividi-lo em pedaços mais pequenos."
+    : /nada para publicar|sem alterar ficheiros/i.test(motivo) ? "Não consegui perceber que alterações fazer. Reformula o pedido de forma mais concreta."
+    : /quality gate|smoke falhou/i.test(motivo) ? "As alterações que fiz não passaram na verificação de qualidade. Tenta reformular."
     : null;
-  await log(order.app_id, order.id, order.user_id, "sistema", humano ? "erro_humano" : "erro", humano ?? motivo);
-  await runlog(order.id, "stderr", `falhou: ${motivo}`);
-  await event(order.app_id, order.id, order.user_id, "worker.falhou", { motivo });
+  // Grava HUMANO em orders.erro (é o que a UI mostra); o cru só no runlog + event.
+  const paraUI = humano ?? motivo;
+  await supabase.from("studio_orders").update({ estado: "falhou", erro: paraUI }).eq("id", order.id);
+  await log(order.app_id, order.id, order.user_id, "sistema", humano ? "erro_humano" : "erro", paraUI);
+  await runlog(order.id, "stderr", `falhou (cru): ${motivo}`);
+  await event(order.app_id, order.id, order.user_id, "worker.falhou", { motivo, mostrado: paraUI });
 }
 
 async function failEarly(order: OrderRow, motivo: string) {
