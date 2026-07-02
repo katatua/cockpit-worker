@@ -56,12 +56,10 @@ async function nextOrder(): Promise<OrderRow | null> {
  * Se for conversa, responde direto e marca `cancelado` (nada a executar).
  */
 async function interpretRascunho(order: OrderRow): Promise<void> {
-  console.log(`[${order.id.slice(0, 8)}] START interpretRascunho`);
+  console.log(`[${order.id.slice(0, 8)}] a interpretar rascunho…`);
   try {
-    console.log(`[${order.id.slice(0, 8)}] pre-log pensamento`);
     // Fatia B · aviso IMEDIATO antes de chamar o LLM (mata os primeiros 5s de silêncio)
     await log(order.app_id, order.id, order.user_id, "agente", "pensamento", "A perceber o que queres…");
-    console.log(`[${order.id.slice(0, 8)}] post-log OK · pre-interpret`);
     const result = await interpret(order.texto, process.env.ANTHROPIC_API_KEY!);
     console.log(`[${order.id.slice(0, 8)}] interpret result kind=${result.kind} tokens=${result.tokensUsed}`);
     if (result.kind === "conversa") {
@@ -93,18 +91,15 @@ async function interpretRascunho(order: OrderRow): Promise<void> {
     }
 
     // Trabalho normal: escreve intenção + card "confirmacao".
-    console.log(`[${order.id.slice(0, 8)}] pre-update trabalho intencao=${JSON.stringify(result.intencao).slice(0,60)}`);
     const upd = await supabase.from("studio_orders").update({
       estado: "aguarda_confirmacao", intencao: result.intencao, tokens_usados: result.tokensUsed,
     }).eq("id", order.id);
-    if (upd.error) console.error(`[${order.id.slice(0, 8)}] UPDATE erro:`, upd.error);
-    console.log(`[${order.id.slice(0, 8)}] post-update trabalho OK`);
+    if (upd.error) { console.error(`[${order.id.slice(0, 8)}] UPDATE erro:`, upd.error.message); throw upd.error; }
     const ins = await supabase.from("studio_messages").insert({
       app_id: order.app_id, order_id: order.id, user_id: order.user_id,
       autor: "agente", tipo: "confirmacao", conteudo: { text: result.intencao },
     });
-    if (ins.error) console.error(`[${order.id.slice(0, 8)}] INSERT msg erro:`, ins.error);
-    console.log(`[${order.id.slice(0, 8)}] post-insert msg OK`);
+    if (ins.error) console.error(`[${order.id.slice(0, 8)}] INSERT msg erro:`, ins.error.message);
     await event(order.app_id, order.id, order.user_id, "order.intencao", { intencao: result.intencao, tokensUsed: result.tokensUsed });
     supabase.rpc("increment_user_tokens", { p_user_id: order.user_id, p_amount: result.tokensUsed }).then(() => {});
   } catch (e) {

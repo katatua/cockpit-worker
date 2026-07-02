@@ -67,9 +67,17 @@ export async function interpret(texto: string, apiKey: string): Promise<Interpre
   const textBlock = j.content.find((c) => c.type === "text");
   if (!textBlock) throw new Error("interpret: sem text block na resposta");
 
+  // Haiku às vezes envolve o JSON num code fence markdown (```json ... ```).
+  // Faz strip do fence antes do parse.
+  const rawText = textBlock.text.trim();
+  const stripped = rawText
+    .replace(/^```(?:json)?\s*\n?/i, "")
+    .replace(/\n?```\s*$/i, "")
+    .trim();
   let parsed: { kind: string; intencao?: string; resposta?: string; nomeAppSugerido?: string };
-  try { parsed = JSON.parse(textBlock.text); } catch {
-    parsed = { kind: "trabalho", intencao: textBlock.text.slice(0, 200) };
+  try { parsed = JSON.parse(stripped); } catch {
+    // fallback: usa a primeira linha como intenção se JSON continua a falhar
+    parsed = { kind: "trabalho", intencao: rawText.split("\n")[0].slice(0, 200) };
   }
   const kind = parsed.kind === "conversa" ? "conversa"
     : parsed.kind === "app_nova" ? "app_nova"
