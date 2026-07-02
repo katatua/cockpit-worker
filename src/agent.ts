@@ -12,7 +12,8 @@
  */
 import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { CONFIG } from "./config.js";
-import { runlog } from "./db.js";
+import { runlog, supabase } from "./db.js";
+import { humanizeToolUse } from "./humanize.js";
 
 export type AgentRun = {
   finalText: string;
@@ -27,7 +28,9 @@ export type AgentInput = {
   userPrompt: string;
   mode: "build" | "chat";
   resumeSessionId?: string | null;
-  orderId?: string; // para escrever no runlog
+  orderId?: string;   // para escrever no runlog
+  appId?: string;     // para escrever mensagens atividade
+  userId?: string;    // para inserir com user_id preservado
 };
 
 export async function runAgent(input: AgentInput): Promise<AgentRun> {
@@ -72,15 +75,45 @@ export async function runAgent(input: AgentInput): Promise<AgentRun> {
       sessionId = ((m as { session_id?: string }).session_id) ?? null;
     }
 
-    // Runlog: cada ação (tool call) escreve no terminal do admin.
+    // Runlog + mensagens `atividade` humanizadas.
+    // Cada tool_use do agente vira uma linha crua no runlog (admin) E uma
+    // mensagem no chat do 0-coder (traduzida por humanize.ts).
     if (m.type === "assistant" && input.orderId) {
-      const content = (m as { message?: { content?: Array<{ type: string; name?: string; input?: unknown }> } }).message?.content ?? [];
+      const content = (m as { message?: { content?: Array<{ type: string; name?: string; input?: Record<string, unknown> }> } }).message?.content ?? [];
       for (const c of content) {
         if (c.type === "tool_use" && c.name) {
           const isMcp = c.name.startsWith("mcp__");
           const stream = isMcp ? "mcp" : "tool";
           const preview = JSON.stringify(c.input ?? {}).slice(0, 180);
           runlog(input.orderId, stream as "tool" | "info", `${c.name} ${preview}`).catch(() => {});
+
+          // Fatia B: humanizar para o chat do 0-coder.
+          // Fatia C: adiciona também sub-passo ao plano.p2 (hierárquico).
+          if (input.appId && input.userId) {
+            const humano = humanizeToolUse(c.name, c.input ?? {});
+            if (humano) {
+              supabase.from("studio_messages").insert({
+                app_id: input.appId, order_id: input.orderId, user_id: input.userId,
+                autor: "agente", tipo: "atividade", conteudo: { text: humano },
+              }).then((r) => { if (r.error) console.warn(`msg atividade falhou: ${r.error.message}`); });
+
+              // Sub-passo no plano — vai buscar plano actual, adiciona ao p2.
+              supabase.from("studio_orders").select("plano").eq("id", input.orderId).single()
+                .then((r) => {
+                  const p = r.data?.plano as { passos: Array<{ id: string; subpassos?: Array<{ id: string; titulo: string; estado: string }> }> } | null;
+                  if (!p) return;
+                  const p2 = p.passos.find((x) => x.id === "p2");
+                  if (!p2) return;
+                  if (!p2.subpassos) p2.subpassos = [];
+                  const subId = `p2s${p2.subpassos.length + 1}`;
+                  // Se o último subpasso é "em_execucao", marca-o feito.
+                  const anterior = p2.subpassos[p2.subpassos.length - 1];
+                  if (anterior && anterior.estado === "em_execucao") anterior.estado = "feito";
+                  p2.subpassos.push({ id: subId, titulo: humano, estado: "em_execucao" });
+                  return supabase.from("studio_orders").update({ plano: p }).eq("id", input.orderId!);
+                }).then(() => {}, () => {});
+            }
+          }
         }
       }
     }

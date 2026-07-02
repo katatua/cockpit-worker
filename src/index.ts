@@ -57,6 +57,8 @@ async function nextOrder(): Promise<OrderRow | null> {
  */
 async function interpretRascunho(order: OrderRow): Promise<void> {
   console.log(`[${order.id.slice(0, 8)}] a interpretar rascunho…`);
+  // Fatia B · aviso IMEDIATO antes de chamar o LLM (mata os primeiros 5s de silêncio)
+  await log(order.app_id, order.id, order.user_id, "agente", "pensamento", "A perceber o que queres…");
   try {
     const result = await interpret(order.texto, process.env.ANTHROPIC_API_KEY!);
     if (result.kind === "conversa") {

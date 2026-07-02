@@ -24,6 +24,7 @@ import { smokeTest } from "./smoke.js";
 import { nextEstrategia, estrategiaGuidance, esgotadaHumana, type Estrategia } from "./loop-detector.js";
 import { discoverRoutes } from "./routes-scanner.js";
 import { scheduleNextRound } from "./campaign-sweep.js";
+import { startHeartbeat } from "./heartbeat.js";
 
 const MAX_ITER = 8; // safety net anti-runaway
 
@@ -59,6 +60,9 @@ export async function processOrder(order: OrderRow): Promise<void> {
   await supabase.from("studio_orders").update({ estado: "em_execucao", plano }).eq("id", order.id);
   await event(order.app_id, order.id, order.user_id, "worker.arranque", { worker: CONFIG.WORKER_ID, modo: order.modo });
   await runlog(order.id, "info", `worker=${CONFIG.WORKER_ID} arranque · modo=${order.modo}`);
+
+  // Fatia B · heartbeat a cada 8s se houver silêncio > 6s no chat.
+  const stopHeartbeat = startHeartbeat({ appId: order.app_id, orderId: order.id, userId: order.user_id });
 
   let lastError: string | null = null;
   let currentEstrategia: Estrategia = "padrao";
@@ -140,6 +144,8 @@ export async function processOrder(order: OrderRow): Promise<void> {
         mode: order.modo,
         resumeSessionId: sessionId,
         orderId: order.id,
+        appId: order.app_id,
+        userId: order.user_id,
       });
       if (runRes.mcpToolsFaltantes.length > 0) {
         await event(order.app_id, order.id, order.user_id, "mcp.capacidade_em_falta", { tools: runRes.mcpToolsFaltantes });
@@ -308,6 +314,7 @@ export async function processOrder(order: OrderRow): Promise<void> {
   } catch (e) {
     await fail(order, e instanceof Error ? e.message : String(e));
   } finally {
+    stopHeartbeat();
     await unlock(order.app_id);
     await event(order.app_id, order.id, order.user_id, "worker.lock_libertado", {});
   }
