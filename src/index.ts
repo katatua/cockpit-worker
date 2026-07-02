@@ -56,11 +56,14 @@ async function nextOrder(): Promise<OrderRow | null> {
  * Se for conversa, responde direto e marca `cancelado` (nada a executar).
  */
 async function interpretRascunho(order: OrderRow): Promise<void> {
-  console.log(`[${order.id.slice(0, 8)}] a interpretar rascunho…`);
-  // Fatia B · aviso IMEDIATO antes de chamar o LLM (mata os primeiros 5s de silêncio)
-  await log(order.app_id, order.id, order.user_id, "agente", "pensamento", "A perceber o que queres…");
+  console.log(`[${order.id.slice(0, 8)}] START interpretRascunho`);
   try {
+    console.log(`[${order.id.slice(0, 8)}] pre-log pensamento`);
+    // Fatia B · aviso IMEDIATO antes de chamar o LLM (mata os primeiros 5s de silêncio)
+    await log(order.app_id, order.id, order.user_id, "agente", "pensamento", "A perceber o que queres…");
+    console.log(`[${order.id.slice(0, 8)}] post-log OK · pre-interpret`);
     const result = await interpret(order.texto, process.env.ANTHROPIC_API_KEY!);
+    console.log(`[${order.id.slice(0, 8)}] interpret result kind=${result.kind} tokens=${result.tokensUsed}`);
     if (result.kind === "conversa") {
       await log(order.app_id, order.id, order.user_id, "agente", "texto", result.resposta ?? "");
       await supabase.from("studio_orders").update({
