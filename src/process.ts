@@ -323,9 +323,12 @@ export async function processOrder(order: OrderRow): Promise<void> {
 async function fail(order: OrderRow, motivo: string) {
   console.error(`[${order.id.slice(0, 8)}] falhou: ${motivo}`);
   await supabase.from("studio_orders").update({ estado: "falhou", erro: motivo }).eq("id", order.id);
-  // Se o motivo já é humano (esgotadaHumana), envia como erro_humano; senão erro cru.
-  const humanoLike = motivo.startsWith("Tentei várias abordagens");
-  await log(order.app_id, order.id, order.user_id, "sistema", humanoLike ? "erro_humano" : "erro", motivo);
+  // Traduz mensagens técnicas para humano quando dá para reconhecer.
+  const humano = motivo.startsWith("Tentei várias abordagens") ? motivo
+    : /aborted by user|demorou muito/i.test(motivo) ? "A demorar demasiado — parei para não gastar mais. Tenta reformular ou dividir em pedaços menores."
+    : /nada para publicar/i.test(motivo) ? "Não consegui perceber que alterações fazer. Reformula o pedido de forma mais concreta."
+    : null;
+  await log(order.app_id, order.id, order.user_id, "sistema", humano ? "erro_humano" : "erro", humano ?? motivo);
   await runlog(order.id, "stderr", `falhou: ${motivo}`);
   await event(order.app_id, order.id, order.user_id, "worker.falhou", { motivo });
 }

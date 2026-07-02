@@ -58,11 +58,11 @@ export async function runAgent(input: AgentInput): Promise<AgentRun> {
   let sessionId: string | null = null;
   const mcpToolsFaltantes: string[] = [];
 
-  // Timeout de segurança: se o Agent SDK não terminar em 4 min OU se ficar
-  // >90s sem produzir novo message, aborta. Muitos tool_use → pausa longa
-  // entre eles é normal (10-20s), mas > 90s costuma ser hang.
-  const AGENT_TOTAL_MS = 4 * 60 * 1000;
-  const AGENT_IDLE_MS = 90_000;
+  // Timeout de segurança: total 8 min OU 3 min sem mensagem nova do SDK
+  // (Opus pode ficar muito tempo a raciocinar entre tool_use, especialmente
+  // em edições complexas de código).
+  const AGENT_TOTAL_MS = 8 * 60 * 1000;
+  const AGENT_IDLE_MS = 180_000;
   const startAt = Date.now();
   let lastMsgAt = Date.now();
   let timedOut = false;
