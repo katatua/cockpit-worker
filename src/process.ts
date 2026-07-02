@@ -22,6 +22,7 @@ import { CONFIG } from "./config.js";
 import { cleanWorktree, shallowClone, createBranch, hasChanges, commitAll, push, diffStat } from "./git.js";
 import { runAgent } from "./agent.js";
 import { waitForPreviewDeploy } from "./vercel.js";
+import { checkQuality } from "./quality.js";
 
 // Studio Fatia 4: rótulos humanos no plano (o tecnês vive no terminal).
 const PASSOS = [
@@ -126,12 +127,34 @@ export async function processOrder(order: OrderRow): Promise<void> {
     await runlog(order.id, "deploy", `poll vercel · project=${app.vercel_project_id} · branch=${branch}`);
     const deploy = await waitForPreviewDeploy(app.vercel_project_id, branch);
     await runlog(order.id, "deploy", `READY · ${deploy.url}`);
+
+    // Brief §4.6 · quality gate prova-de-vida.
+    // Antes de marcar preview_pronto, verifica que a app não está partida.
+    await log(order.app_id, order.id, order.user_id, "agente", "atividade", "A verificar se tudo funciona…");
+    await runlog(order.id, "info", `quality gate · ${deploy.url}`);
+    const quality = await checkQuality(deploy.url);
+    await runlog(order.id, "info", `quality gate: ${quality.checked} URLs, ${quality.falhas.length} problemas`);
+    if (!quality.ok) {
+      // Falha honesta: escreve o resultado no runlog + falha ordem com motivo humano.
+      // A UI mostra `erro_humano`. O detetor de loop (F16) vai decidir estratégia
+      // alternativa nas próximas iterações.
+      for (const f of quality.falhas.slice(0, 10)) {
+        await runlog(order.id, "stderr", `broken: ${f.url} · ${f.motivo}`);
+      }
+      const resumo = quality.falhas.length === 1
+        ? "Um link não está a funcionar. Vou tentar corrigir."
+        : `${quality.falhas.length} coisas não estão a funcionar. Vou tentar corrigir.`;
+      await log(order.app_id, order.id, order.user_id, "agente", "erro_humano", resumo);
+      await event(order.app_id, order.id, order.user_id, "worker.quality_falhou", { checked: quality.checked, falhas: quality.falhas });
+      throw new Error(`quality gate falhou: ${quality.falhas.length} problemas em ${quality.checked} URLs`);
+    }
+
     plano = step(plano, "p4", "feito");
     await supabase.from("studio_orders").update({
       plano, preview_url: deploy.url, preview_deploy_id: deploy.deployId, estado: "preview_pronto",
     }).eq("id", order.id);
     await log(order.app_id, order.id, order.user_id, "agente", "texto", `✓ Pré-visualização pronta.`);
-    await event(order.app_id, order.id, order.user_id, "worker.preview_pronto", { url: deploy.url, ms: Date.now() - t0 });
+    await event(order.app_id, order.id, order.user_id, "worker.preview_pronto", { url: deploy.url, ms: Date.now() - t0, qualityChecked: quality.checked });
 
     console.log(`[${order.id.slice(0, 8)}] preview_pronto em ${Date.now() - t0}ms · ${deploy.url}`);
   } catch (e) {

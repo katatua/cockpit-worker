@@ -33,7 +33,7 @@ export type AppRow = {
 
 export type Plano = { passos: { id: string; titulo: string; estado: "por_fazer" | "em_execucao" | "feito" | "falhou" }[] };
 
-export async function log(appId: string, orderId: string, userId: string, autor: "sistema" | "agente", tipo: "texto" | "erro" | "estado" | "atividade" | "pensamento", text: string) {
+export async function log(appId: string, orderId: string, userId: string, autor: "sistema" | "agente", tipo: "texto" | "erro" | "estado" | "atividade" | "pensamento" | "confirmacao" | "erro_humano", text: string) {
   await supabase.from("studio_messages").insert({ app_id: appId, order_id: orderId, user_id: userId, autor, tipo, conteudo: { text } });
 }
 
