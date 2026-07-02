@@ -58,6 +58,24 @@ export async function runAgent(input: AgentInput): Promise<AgentRun> {
   let sessionId: string | null = null;
   const mcpToolsFaltantes: string[] = [];
 
+  // Timeout de segurança: se o Agent SDK não terminar em 4 min OU se ficar
+  // >90s sem produzir novo message, aborta. Muitos tool_use → pausa longa
+  // entre eles é normal (10-20s), mas > 90s costuma ser hang.
+  const AGENT_TOTAL_MS = 4 * 60 * 1000;
+  const AGENT_IDLE_MS = 90_000;
+  const startAt = Date.now();
+  let lastMsgAt = Date.now();
+  let timedOut = false;
+  const abortController = new AbortController();
+  const guard = setInterval(() => {
+    const now = Date.now();
+    if (now - startAt > AGENT_TOTAL_MS || now - lastMsgAt > AGENT_IDLE_MS) {
+      timedOut = true;
+      abortController.abort();
+    }
+  }, 5000);
+
+  try {
   for await (const msg of query({
     prompt: input.userPrompt,
     options: {
@@ -65,10 +83,12 @@ export async function runAgent(input: AgentInput): Promise<AgentRun> {
       allowedTools: allowedToolsBase,
       permissionMode: input.mode === "chat" ? "plan" : "acceptEdits",
       systemPrompt: input.systemPrompt,
+      abortController,
       ...(mcpServers ? { mcpServers } : {}),
       ...(input.resumeSessionId ? { resume: input.resumeSessionId } : {}),
-    },
+    } as Record<string, unknown>,
   })) {
+    lastMsgAt = Date.now(); // qualquer mensagem reset o watchdog de silêncio
     const m = msg as SDKMessage & Record<string, unknown>;
 
     if (m.type === "system" && (m as { subtype?: string }).subtype === "init") {
@@ -141,6 +161,14 @@ export async function runAgent(input: AgentInput): Promise<AgentRun> {
         + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
     }
     // Brief §1: sem teto de tokens. Kill-switch do dono corta processos novos.
+  }
+  } finally {
+    clearInterval(guard);
+  }
+
+  if (timedOut) {
+    const elapsed = Math.round((Date.now() - startAt) / 1000);
+    throw new Error(`agente demorou muito sem terminar (${elapsed}s)`);
   }
 
   return { finalText, tokensUsed, sessionId, mcpToolsFaltantes };
