@@ -1,24 +1,30 @@
-# Studio worker · Fly.io config
+# fly.toml app configuration file generated for cockpit-worker-79fnmw on 2026-07-02T14:14:34Z
 #
-# Background worker (sem http_service). Uma máquina persistente na região arn
-# (Estocolmo), colada ao Supabase eu-north-1.
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
-# IMPORTANTE: o processo chama-se `app` (não `worker`) para casar com o nome
-# que a Fly Launch injeta por defeito para apps NodeJS. Se renomeares, o
-# validator do Fly recusa ("Service specifies 'app' as one of its processes").
 
-app = "cockpit-worker"
-primary_region = "arn"
+app = 'cockpit-worker-79fnmw'
+primary_region = 'cdg'
 
 [build]
 
+[deploy]
+  strategy = 'immediate'
+
 [processes]
-  app = "node dist/index.js"
+  app = 'node dist/index.js'
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
 
 [[vm]]
-  size = "shared-cpu-1x"
-  memory = "512mb"
+  size = 'shared-cpu-1x'
+  memory = '512mb'
+  cpu_kind = 'shared'
   cpus = 1
-
-[deploy]
-  strategy = "immediate"
+  memory_mb = 512
