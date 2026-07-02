@@ -1,0 +1,22 @@
+# Studio worker · Fly.io config
+# Background worker (sem http_service). Uma máquina persistente na região arn (Estocolmo),
+# colada ao Supabase eu-north-1.
+
+app = "cockpit-worker"
+primary_region = "arn"
+
+[build]
+
+# Sem http_service — é um daemon que faz poll à BD, não serve requests.
+
+# Auto-stop DESATIVADO: precisa de estar sempre a fazer poll.
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+  cpus = 1
+
+[processes]
+  worker = "node dist/index.js"
+
+[deploy]
+  strategy = "immediate"
