@@ -104,7 +104,21 @@ async function handlePreview(req: IncomingMessage, res: ServerResponse): Promise
       res.end();
       return;
     }
-    sendJson(res, 503, { error: "preview a arrancar; tenta em ~30s" });
+    // HTML humano em vez de JSON cru (o iframe pode carregar isto e mostrar).
+    const html = `<!doctype html><html lang="pt"><head><meta charset="utf-8"><title>A preparar</title>
+<style>body{font-family:system-ui,-apple-system,sans-serif;background:#fafafa;color:#333;
+display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:2rem;text-align:center}
+h1{font-weight:400;font-size:1.1rem;margin:.5rem 0}
+p{font-size:.85rem;color:#666;margin:0}
+.d{display:inline-flex;gap:.4rem;margin-bottom:.75rem}
+.d span{width:.4rem;height:.4rem;border-radius:50%;background:#999;animation:p 1.4s infinite}
+.d span:nth-child(2){animation-delay:.15s}.d span:nth-child(3){animation-delay:.3s}
+@keyframes p{0%,80%,100%{opacity:.2}40%{opacity:1}}
+</style></head><body><div>
+<div class="d"><span></span><span></span><span></span></div>
+<h1>A preparar a pré-visualização</h1><p>Costuma demorar cerca de 30 segundos.</p></div></body></html>`;
+    res.writeHead(503, { "content-type": "text/html; charset=utf-8" });
+    res.end(html);
     return;
   }
 
