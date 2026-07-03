@@ -27,30 +27,6 @@ process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 
 /**
- * Brief §4.2: 2 filas na mesma poll — rascunho (interpretar) e em_fila (executar).
- * Prioridade por FIFO absoluto (created_at ASC, sem preferência de estado).
- */
-async function nextOrder(): Promise<OrderRow | null> {
-  // Ordens de campanha bloqueada não devem ser apanhadas.
-  const { data: bloqueadas } = await supabase.from("studio_campaigns").select("id").eq("estado", "bloqueada");
-  const idsBloqueadas = ((bloqueadas ?? []) as { id: string }[]).map((c) => c.id);
-
-  let q = supabase
-    .from("studio_orders")
-    .select("id, user_id, app_id, texto, modo, estado, session_id, tokens_usados")
-    .in("estado", ["rascunho", "em_fila"])
-    .order("created_at", { ascending: true })
-    .limit(1);
-  if (idsBloqueadas.length > 0) {
-    // exclude campaign_id in list (postgrest: "not.in")
-    q = q.or(`campaign_id.is.null,campaign_id.not.in.(${idsBloqueadas.join(",")})`);
-  }
-  const { data, error } = await q.maybeSingle();
-  if (error) { console.error("poll erro:", error.message); return null; }
-  return data as OrderRow | null;
-}
-
-/**
  * Interpretação de intenção: recebe texto cru, produz frase humana, marca
  * a ordem em `aguarda_confirmacao` com o card "Avanço?".
  * Se for conversa, responde direto e marca `cancelado` (nada a executar).
@@ -133,16 +109,62 @@ console.log(`Poll a cada ${CONFIG.POLL_INTERVAL_S}s · orçamento max ${CONFIG.M
 startRouter(8080);
 setInterval(sweepIdle, 60_000);
 
+// CONCORRÊNCIA: uma ordem grande não pode monopolizar o worker inteiro.
+// Processamos até MAX_CONCURRENT ordens em paralelo, de APPS DIFERENTES
+// (studio_locks já garante 1 ordem/app; o in-flight set evita duplo arranque
+// da mesma ordem entre o poll e o lock).
+const MAX_CONCURRENT = 3;
+const inflightOrders = new Set<string>();
+const inflightApps = new Set<string>();
+
+async function nextEligible(): Promise<OrderRow | null> {
+  const { data: bloqueadas } = await supabase.from("studio_campaigns").select("id").eq("estado", "bloqueada");
+  const idsBloqueadas = ((bloqueadas ?? []) as { id: string }[]).map((c) => c.id);
+  let q = supabase
+    .from("studio_orders")
+    .select("id, user_id, app_id, texto, modo, estado, session_id, tokens_usados")
+    .in("estado", ["rascunho", "em_fila"])
+    .order("created_at", { ascending: true })
+    .limit(10);
+  if (idsBloqueadas.length > 0) {
+    q = q.or(`campaign_id.is.null,campaign_id.not.in.(${idsBloqueadas.join(",")})`);
+  }
+  const { data, error } = await q;
+  if (error) { console.error("poll erro:", error.message); return null; }
+  for (const o of (data ?? []) as OrderRow[]) {
+    if (inflightOrders.has(o.id)) continue;
+    if (inflightApps.has(o.app_id)) continue; // outra ordem desta app já em curso aqui
+    return o;
+  }
+  return null;
+}
+
+function launchOrder(order: OrderRow): void {
+  inflightOrders.add(order.id);
+  inflightApps.add(order.app_id);
+  inflight = true;
+  const pipeline = order.estado === "rascunho" ? interpretRascunho(order) : processOrder(order);
+  pipeline
+    .catch((e) => console.error(`[${order.id.slice(0, 8)}] pipeline erro:`, e instanceof Error ? e.message : e))
+    .finally(() => {
+      inflightOrders.delete(order.id);
+      inflightApps.delete(order.app_id);
+      inflight = inflightOrders.size > 0;
+    });
+}
+
 while (running) {
   try {
-    const order = await nextOrder();
+    if (inflightOrders.size >= MAX_CONCURRENT) {
+      await new Promise((r) => setTimeout(r, CONFIG.POLL_INTERVAL_S * 1000));
+      continue;
+    }
+    const order = await nextEligible();
     if (!order) {
       await new Promise((r) => setTimeout(r, CONFIG.POLL_INTERVAL_S * 1000));
       continue;
     }
-    // Brief §4.11: kill-switch (global ou por app). Não corta ordens em curso —
-    // apenas recusa novas. Registamos como cancelado com motivo para o utilizador
-    // saber que o dono pausou (linguagem humana).
+    // Brief §4.11: kill-switch (global ou por app).
     const kill = await killSwitchActive(order.app_id);
     if (kill.active) {
       console.log(`[${order.id.slice(0, 8)}] kill-switch: ${kill.motivo}`);
@@ -153,16 +175,11 @@ while (running) {
       await event(order.app_id, order.id, order.user_id, "worker.kill_switch", { motivo: kill.motivo });
       continue;
     }
-    inflight = true;
-    // 2 pipelines: interpretação (rápido) vs execução (longo).
-    if (order.estado === "rascunho") {
-      await interpretRascunho(order);
-    } else {
-      await processOrder(order);
-    }
-    inflight = false;
+    console.log(`[${order.id.slice(0, 8)}] launch (${inflightOrders.size + 1}/${MAX_CONCURRENT} em curso)`);
+    launchOrder(order);
+    // Pequena pausa entre launches para o estado da BD assentar (em_execucao)
+    await new Promise((r) => setTimeout(r, 1500));
   } catch (e) {
-    inflight = false;
     console.error("loop erro:", e instanceof Error ? e.message : e);
     await new Promise((r) => setTimeout(r, CONFIG.POLL_INTERVAL_S * 1000));
   }
