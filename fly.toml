@@ -39,9 +39,12 @@ primary_region = 'cdg'
 # index.ts desceu 3→2 pelo mesmo motivo.
 swap_size_mb = 1024
 
+# 2026-07-03 (2ª lição de capacidade): com 2 agentes em paralelo num único
+# vCPU partilhado, o chromium do smoke nem carrega uma página em 45s e o
+# idle-watchdog mata agentes saudáveis. 2 vCPU = 1 por agente concorrente.
 [[vm]]
-  size = 'shared-cpu-1x'
+  size = 'shared-cpu-2x'
   memory = '2gb'
   cpu_kind = 'shared'
-  cpus = 1
+  cpus = 2
   memory_mb = 2048
