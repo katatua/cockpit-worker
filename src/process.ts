@@ -12,8 +12,9 @@
  *   - Estratégias esgotadas → falhou com erro_humano com alternativa
  *   - MAX_ITER (safety net absoluto contra runaway)
  */
-import { readFile } from "node:fs/promises";
+import { readFile, access } from "node:fs/promises";
 import path from "node:path";
+import { spawnPromise } from "./spawn-helpers.js";
 import { supabase, tryLock, unlock, log, event, runlog, resetRunlogSeq, type OrderRow, type AppRow, type Plano } from "./db.js";
 import { CONFIG } from "./config.js";
 import { cleanWorktree, shallowClone, createBranch, hasChanges, commitAll, push, diffStat } from "./git.js";
@@ -90,6 +91,34 @@ export async function processOrder(order: OrderRow): Promise<void> {
       } else {
         // Iteração incremental: reutiliza worktree, agente vai por cima do commit anterior.
         worktree = path.join(CONFIG.WORKTREE_ROOT, order.id);
+      }
+
+      // --- (2a) npm install para o agente poder correr build/test ---
+      // Sem node_modules o agente falha em `npm run build` (next not found).
+      // Só corre na primeira iteração (worktree é persistente entre iter).
+      if (iter === 1) {
+        const hasNodeModules = await access(path.join(worktree, "node_modules"))
+          .then(() => true).catch(() => false);
+        if (!hasNodeModules) {
+          const pkgJson = await access(path.join(worktree, "package.json"))
+            .then(() => true).catch(() => false);
+          if (pkgJson) {
+            await log(order.app_id, order.id, order.user_id, "agente", "atividade", "A preparar os componentes…");
+            await runlog(order.id, "info", `npm install em ${worktree}`);
+            const hasLock = await access(path.join(worktree, "package-lock.json"))
+              .then(() => true).catch(() => false);
+            try {
+              await spawnPromise(hasLock ? "npm" : "npm",
+                hasLock ? ["ci", "--no-audit", "--no-fund", "--prefer-offline"]
+                        : ["install", "--no-audit", "--no-fund"],
+                { cwd: worktree });
+              await runlog(order.id, "info", `npm install OK`);
+            } catch (e) {
+              await runlog(order.id, "stderr", `npm install falhou: ${e instanceof Error ? e.message.slice(0, 200) : String(e)}`);
+              // Não bloqueia — o agente pode fazer as alterações e o Vercel constrói depois.
+            }
+          }
+        }
       }
 
       // --- (2) Contexto (só primeira vez) ---
