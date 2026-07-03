@@ -44,10 +44,25 @@ export async function log(appId: string, orderId: string, userId: string, autor:
  * última). Batch para reduzir carga: podes juntar N linhas e chamar 1x.
  * Fire-and-forget — se falhar, apenas perdemos o terminal, não a ordem.
  */
-type RunLogStream = "stdout" | "stderr" | "tool" | "edit" | "deploy" | "info";
+type RunLogStream = "stdout" | "stderr" | "tool" | "edit" | "deploy" | "info" | "mcp";
+// seq monotónico POR ORDEM, sobrevivendo a restarts da máquina: na primeira
+// escrita de cada ordem neste processo, lê max(seq) da BD e continua daí.
+// (Antes era Map puro em memória — restart do Fly recomeçava em 1 e o viewer
+//  ordenava mal.)
 const _seqByOrder = new Map<string, number>();
 export async function runlog(orderId: string, stream: RunLogStream, linha: string): Promise<void> {
-  const seq = (_seqByOrder.get(orderId) ?? 0) + 1;
+  let base = _seqByOrder.get(orderId);
+  if (base === undefined) {
+    const { data } = await supabase
+      .from("studio_runlog")
+      .select("seq")
+      .eq("order_id", orderId)
+      .order("seq", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    base = (data as { seq?: number } | null)?.seq ?? 0;
+  }
+  const seq = base + 1;
   _seqByOrder.set(orderId, seq);
   await supabase.from("studio_runlog").insert({ order_id: orderId, seq, stream, linha }).then((r) => {
     if (r.error) console.warn(`[${orderId.slice(0, 8)}] runlog falhou: ${r.error.message}`);
