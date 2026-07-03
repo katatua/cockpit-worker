@@ -38,8 +38,18 @@ const PASSOS = [
 ] as const;
 
 function makePlan(): Plano { return { passos: PASSOS.map((titulo, i) => ({ id: `p${i + 1}`, titulo, estado: "por_fazer" })) }; }
+// Grava timestamps por passo (estilo Claude Code: a UI mostra a duração).
 function step(plano: Plano, id: string, estado: Plano["passos"][number]["estado"]) {
-  return { passos: plano.passos.map((p) => p.id === id ? { ...p, estado } : p) };
+  const now = new Date().toISOString();
+  return {
+    passos: plano.passos.map((p) => {
+      if (p.id !== id) return p;
+      const extra: Record<string, string> = {};
+      if (estado === "em_execucao" && !(p as Record<string, unknown>).iniciado_at) extra.iniciado_at = now;
+      if (estado === "feito" || estado === "falhou") extra.terminado_at = now;
+      return { ...p, estado, ...extra };
+    }),
+  };
 }
 
 export async function processOrder(order: OrderRow): Promise<void> {
