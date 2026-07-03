@@ -16,7 +16,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, access } from "node:fs/promises";
+import { mkdir, access, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { supabase } from "./db.js";
 import { authedRepoUrl, cleanWorktree } from "./git.js";
@@ -100,8 +100,20 @@ async function spawnPreview(slug: string): Promise<{ port: number; ready: boolea
       await spawnPromise("git", ["clone", "--depth", "1", authedRepoUrl(app.github_repo), dir]);
     }
     // Install deps (idempotente — npm ci usa lockfile; senão npm install).
+    // SELF-HEAL: um OOM a meio de `npm install` deixa package-lock.json
+    // truncado no volume (visto 2026-07-03: `npm ci` imprimia o usage e
+    // falhava para sempre). Se o ci falhar, apaga o lock e regenera.
     const hasLock = await access(join(dir, "package-lock.json")).then(() => true).catch(() => false);
-    await spawnPromise(hasLock ? "npm" : "npm", hasLock ? ["ci", "--no-audit", "--no-fund"] : ["install", "--no-audit", "--no-fund"], { cwd: dir });
+    if (hasLock) {
+      await spawnPromise("npm", ["ci", "--no-audit", "--no-fund"], { cwd: dir }).catch(async () => {
+        console.warn(`[preview:${slug}] npm ci falhou — lock possivelmente corrupto; a regenerar com npm install`);
+        await rm(join(dir, "package-lock.json"), { force: true });
+        await rm(join(dir, "node_modules"), { recursive: true, force: true });
+        await spawnPromise("npm", ["install", "--no-audit", "--no-fund"], { cwd: dir });
+      });
+    } else {
+      await spawnPromise("npm", ["install", "--no-audit", "--no-fund"], { cwd: dir });
+    }
   } catch (e) {
     usedPorts.delete(port);
     await updateStatus(app.id, "erro", null, e instanceof Error ? e.message : String(e));

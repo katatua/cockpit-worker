@@ -74,7 +74,15 @@ async function fillInput(input: import("playwright-core").Locator): Promise<void
   return input.fill(/nome/.test(hint) ? "Utilizador Teste" : /msg|mensagem|comentar/.test(hint) ? "Teste smoke automático." : "teste");
 }
 
-export async function smokeTest(previewUrl: string): Promise<SmokeReport> {
+/**
+ * §4.6: o smoke map deriva das ROTAS DESCOBERTAS da app (routes-scanner),
+ * não só da homepage. Sem isto, um form em /upload nunca era testado
+ * (visto na ordem e739bb98: forms=0 com o formulário perfeito em /upload).
+ * Máximo 5 rotas para manter o smoke < ~3min.
+ */
+const MAX_ROTAS = 5;
+
+export async function smokeTest(previewUrl: string, rotas: string[] = ["/"]): Promise<SmokeReport> {
   const t0 = Date.now();
   const report: SmokeReport = {
     ok: true,
@@ -106,65 +114,73 @@ export async function smokeTest(previewUrl: string): Promise<SmokeReport> {
     });
     page.on("pageerror", (err) => report.consoleErros.push(`pageerror: ${err.message.slice(0, 200)}`));
 
-    // 1) Carrega a home
-    await page.goto(previewUrl, { waitUntil: "domcontentloaded", timeout: TIMEOUT_MS / 2 });
-    // Damos um instante para React/Next hidrarem antes de contar erros.
-    await page.waitForTimeout(1500);
+    // §4.6: percorre as rotas descobertas (não só a home). Rotas dinâmicas
+    // ([id]) ficam de fora — sem dados reais não há URL concreta.
+    const rotasTestaveis = rotas.filter((r) => !r.includes("[")).slice(0, MAX_ROTAS);
+    if (!rotasTestaveis.includes("/")) rotasTestaveis.unshift("/");
 
-    // 2) Formulários visíveis: preencher inputs e submeter
-    const forms = await page.locator("form:visible").all();
-    for (let i = 0; i < Math.min(forms.length, 3); i++) {
-      report.formulariosTestados++;
-      const form = forms[i];
-      const formLabel = `form${i}`;
-      try {
-        // Preenche inputs (não hidden). File inputs também são apanhados por fillInput.
-        const inputs = await form.locator("input:visible, input[type=file], textarea:visible, select:visible").all();
-        for (const input of inputs) {
-          const tag = await input.evaluate((el) => el.tagName.toLowerCase()).catch(() => "input");
-          if (tag === "select") {
-            // Escolhe a segunda opção se houver
-            const options = await input.locator("option").all();
-            if (options.length > 1) await input.selectOption({ index: 1 }).catch(() => {});
-          } else {
-            await fillInput(input).catch(() => {});
+    for (const rota of rotasTestaveis) {
+      const urlRota = `${previewUrl}${rota === "/" ? "" : rota}`;
+      // 1) Carrega a rota
+      await page.goto(urlRota, { waitUntil: "domcontentloaded", timeout: TIMEOUT_MS / 2 });
+      // Damos um instante para React/Next hidrarem antes de contar erros.
+      await page.waitForTimeout(1500);
+
+      // 2) Formulários visíveis: preencher inputs e submeter
+      const forms = await page.locator("form:visible").all();
+      for (let i = 0; i < Math.min(forms.length, 3); i++) {
+        report.formulariosTestados++;
+        const form = forms[i];
+        const formLabel = `${rota}#form${i}`;
+        try {
+          // Preenche inputs (não hidden). File inputs também são apanhados por fillInput.
+          const inputs = await form.locator("input:visible, input[type=file], textarea:visible, select:visible").all();
+          for (const input of inputs) {
+            const tag = await input.evaluate((el) => el.tagName.toLowerCase()).catch(() => "input");
+            if (tag === "select") {
+              // Escolhe a segunda opção se houver
+              const options = await input.locator("option").all();
+              if (options.length > 1) await input.selectOption({ index: 1 }).catch(() => {});
+            } else {
+              await fillInput(input).catch(() => {});
+            }
           }
+          // Submete via botão submit dentro do form
+          const submitBtn = form.locator("button[type=submit], input[type=submit]").first();
+          if (await submitBtn.count() > 0) {
+            const urlBefore = page.url();
+            await submitBtn.click({ timeout: 3000 }).catch(() => {});
+            await page.waitForTimeout(1500);
+            if (page.url() !== urlBefore) {
+              report.navegacoes++;
+              await page.goto(urlRota, { waitUntil: "domcontentloaded", timeout: 10000 }).catch(() => {});
+              await page.waitForTimeout(500);
+            }
+          }
+        } catch (e) {
+          report.formulariosQuebrados.push({ seletor: formLabel, motivo: e instanceof Error ? e.message.slice(0, 120) : String(e) });
         }
-        // Submete via botão submit dentro do form
-        const submitBtn = form.locator("button[type=submit], input[type=submit]").first();
-        if (await submitBtn.count() > 0) {
-          const urlBefore = page.url();
-          await submitBtn.click({ timeout: 3000 }).catch(() => {});
-          await page.waitForTimeout(1500);
-          if (page.url() !== urlBefore) {
+      }
+
+      // 3) Botões visíveis da rota → click com timeout curto
+      const buttons = await page.locator("button:visible").all();
+      for (let i = 0; i < Math.min(buttons.length, MAX_BOTOES); i++) {
+        report.botoesTestados++;
+        const btn = buttons[i];
+        const label = `${rota}#${(await btn.textContent().catch(() => ""))?.slice(0, 30) ?? `btn${i}`}`;
+        const urlBefore = page.url();
+        try {
+          await btn.click({ timeout: 3000, trial: false });
+          await page.waitForTimeout(500);
+          const urlAfter = page.url();
+          if (urlAfter !== urlBefore) {
             report.navegacoes++;
-            await page.goto(previewUrl, { waitUntil: "domcontentloaded", timeout: 10000 }).catch(() => {});
+            await page.goto(urlRota, { waitUntil: "domcontentloaded", timeout: 10000 }).catch(() => {});
             await page.waitForTimeout(500);
           }
+        } catch (e) {
+          report.botoesQuebrados.push({ seletor: label, motivo: e instanceof Error ? e.message.slice(0, 120) : String(e) });
         }
-      } catch (e) {
-        report.formulariosQuebrados.push({ seletor: formLabel, motivo: e instanceof Error ? e.message.slice(0, 120) : String(e) });
-      }
-    }
-
-    // 3) Todos os botões visíveis → click com timeout curto
-    const buttons = await page.locator("button:visible").all();
-    for (let i = 0; i < Math.min(buttons.length, MAX_BOTOES); i++) {
-      report.botoesTestados++;
-      const btn = buttons[i];
-      const label = (await btn.textContent().catch(() => ""))?.slice(0, 30) ?? `btn${i}`;
-      const urlBefore = page.url();
-      try {
-        await btn.click({ timeout: 3000, trial: false });
-        await page.waitForTimeout(500);
-        const urlAfter = page.url();
-        if (urlAfter !== urlBefore) {
-          report.navegacoes++;
-          await page.goto(previewUrl, { waitUntil: "domcontentloaded", timeout: 10000 }).catch(() => {});
-          await page.waitForTimeout(500);
-        }
-      } catch (e) {
-        report.botoesQuebrados.push({ seletor: label, motivo: e instanceof Error ? e.message.slice(0, 120) : String(e) });
       }
     }
 

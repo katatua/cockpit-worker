@@ -297,8 +297,11 @@ export async function processOrder(order: OrderRow): Promise<void> {
       }
 
       // --- (6b) Smoke Playwright — clique em botões, verifica consola ---
-      await runlog(order.id, "info", `smoke playwright · ${deploy.url}`);
-      const smoke = await smokeTest(deploy.url).catch((e) => {
+      // §4.6: o smoke percorre as ROTAS DESCOBERTAS do worktree (não só a
+      // home) — um form em /upload só é testado assim.
+      const rotasSmoke = await discoverRoutes(worktree).catch(() => ["/"]);
+      await runlog(order.id, "info", `smoke playwright · ${deploy.url} · rotas: ${rotasSmoke.join(", ")}`);
+      const smoke = await smokeTest(deploy.url, rotasSmoke).catch((e) => {
         // Se o Chromium não iniciar (imagem sem playwright, dev local), regista
         // e continua — não bloqueia MVP se o browser em falta.
         console.warn(`[${order.id.slice(0, 8)}] smoke skip:`, e.message);
