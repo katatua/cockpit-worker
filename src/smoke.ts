@@ -32,7 +32,9 @@ export type SmokeReport = {
 };
 
 const EXECUTABLE_PATH = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "/usr/bin/chromium";
-const TIMEOUT_MS = 30_000;
+// 90s (goto usa metade): 15s de goto chumbava apps BOAS — chromium a
+// renderizar numa shared-cpu-1x com agentes ao lado passa fácil dos 15s.
+const TIMEOUT_MS = 90_000;
 const MAX_BOTOES = 10;
 
 /**
