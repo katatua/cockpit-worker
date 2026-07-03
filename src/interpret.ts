@@ -48,7 +48,7 @@ Responde SÓ com JSON válido no formato { "kind": "trabalho"|"conversa"|"app_no
 
 export async function interpret(texto: string, apiKey: string): Promise<InterpretResult> {
   const body = {
-    model: "claude-haiku-4-5-20251001",
+    model: "claude-fable-5",
     max_tokens: 300,
     system: SYSTEM_PROMPT,
     messages: [{ role: "user", content: texto }],

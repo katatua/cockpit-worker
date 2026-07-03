@@ -73,7 +73,7 @@ ${(finalText || "(sem texto final)").slice(0, 800)}`;
       method: "POST",
       headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
       body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",
+        model: "claude-fable-5",
         max_tokens: 800,
         system: SYSTEM,
         messages: [{ role: "user", content: userMsg }],

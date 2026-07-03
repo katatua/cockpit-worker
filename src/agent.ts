@@ -86,6 +86,7 @@ export async function runAgent(input: AgentInput): Promise<AgentRun> {
       permissionMode: input.mode === "chat" ? "plan" : "acceptEdits",
       systemPrompt: input.systemPrompt,
       abortController,
+      model: "claude-fable-5", // LLM do agente (SDK) — configurável
       ...(mcpServers ? { mcpServers } : {}),
       ...(input.resumeSessionId ? { resume: input.resumeSessionId } : {}),
     } as Record<string, unknown>,

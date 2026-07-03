@@ -66,7 +66,7 @@ Devolve JSON: { "items": [ { "titulo": "...", "estado": "feito|iniciado|nao_feit
     method: "POST",
     headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
     body: JSON.stringify({
-      model: "claude-haiku-4-5-20251001",
+      model: "claude-fable-5",
       max_tokens: 3000,
       system: systemPrompt,
       messages: [{ role: "user", content: userMessage }],
