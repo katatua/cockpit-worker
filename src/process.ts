@@ -139,9 +139,12 @@ export async function processOrder(order: OrderRow): Promise<void> {
 
       const systemPrompt = [
         "És o worker do Studio a modificar código da app do 0-coder.",
-        "AUTONOMIA TOTAL: resolve todos os problemas que encontres. NUNCA peças ajuda ou clarificação ao user — decide tu com bom gosto e regista em DECISIONS.md.",
+        "AUTONOMIA TOTAL: resolve todos os problemas que encontres. NUNCA peças ajuda ou clarificação ao user — decide tu com bom gosto.",
         "Se falhas uma tool, tenta outra abordagem. Se um comando falha, lê o erro, adapta, tenta de novo. Só pares quando terminares.",
-        "Segue AGENTS.md e SPEC.md do repo. Escreve código pequeno, focado, testado quando possível.",
+        // Fix eficiência: código PRIMEIRO, burocracia DEPOIS. O agente anterior
+        // gastava minutos em SPEC/DECISIONS/CHANGELOG antes de tocar em código
+        // e era morto pelo timeout a meio.
+        "ORDEM DE TRABALHO OBRIGATÓRIA:\n1. Implementa o código do pedido PRIMEIRO (app/*.tsx, estilos).\n2. Verifica que compila (npm run build) e corrige se preciso.\n3. SÓ NO FIM, se sobrar tempo: atualiza SPEC.md e CHANGELOG.md em 1-2 edições rápidas. NÃO perfeciones a documentação — o código entregue vale mais.",
         "Nunca inventes segredos. Nunca reportes sucesso sem editares mesmo.",
         memoriaBlock,
         agentsMd && `--- AGENTS.md ---\n${agentsMd}`,
@@ -190,16 +193,36 @@ export async function processOrder(order: OrderRow): Promise<void> {
       if (iter === 1) await log(order.app_id, order.id, order.user_id, "agente", "pensamento", "A perceber o pedido…");
       else await log(order.app_id, order.id, order.user_id, "agente", "pensamento", `A tentar outra abordagem (${currentEstrategia.replace(/_/g, " ")})…`);
       await runlog(order.id, "tool", `agent.query iter=${iter}`);
-      const runRes = await runAgent({
-        cwd: worktree,
-        systemPrompt,
-        userPrompt,
-        mode: order.modo,
-        resumeSessionId: sessionId,
-        orderId: order.id,
-        appId: order.app_id,
-        userId: order.user_id,
-      });
+      // SALVAGE: se o agente for morto por timeout MAS já tiver alterado
+      // ficheiros, não deitamos o trabalho fora — seguimos para commit+deploy
+      // e deixamos o quality gate decidir. Só falha se não há alterações.
+      let runRes: Awaited<ReturnType<typeof runAgent>>;
+      let salvaged = false;
+      try {
+        runRes = await runAgent({
+          cwd: worktree,
+          systemPrompt,
+          userPrompt,
+          mode: order.modo,
+          resumeSessionId: sessionId,
+          orderId: order.id,
+          appId: order.app_id,
+          userId: order.user_id,
+        });
+      } catch (agentErr) {
+        const msg = agentErr instanceof Error ? agentErr.message : String(agentErr);
+        const isTimeout = /demorou muito|aborted/i.test(msg);
+        const changedSoFar = isTimeout ? await hasChanges(worktree) : false;
+        if (isTimeout && changedSoFar) {
+          salvaged = true;
+          await runlog(order.id, "info", `SALVAGE: timeout mas há alterações — commit do progresso`);
+          await log(order.app_id, order.id, order.user_id, "agente", "atividade",
+            "Demorou mais do que esperava, mas fiz progresso — vou publicar o que está feito.");
+          runRes = { finalText: "", tokensUsed: 0, sessionId, mcpToolsFaltantes: [], toolsUsadas: [] };
+        } else {
+          throw agentErr;
+        }
+      }
       if (runRes.mcpToolsFaltantes.length > 0) {
         await event(order.app_id, order.id, order.user_id, "mcp.capacidade_em_falta", { tools: runRes.mcpToolsFaltantes });
       }
@@ -207,7 +230,7 @@ export async function processOrder(order: OrderRow): Promise<void> {
       sessionId = runRes.sessionId;
       allToolsUsadas.push(...runRes.toolsUsadas);
       if (runRes.finalText) allFinalText = runRes.finalText;
-      await runlog(order.id, "info", `agent tokens=${runRes.tokensUsed} · total=${totalTokens}`);
+      await runlog(order.id, "info", `agent tokens=${runRes.tokensUsed} · total=${totalTokens}${salvaged ? " · SALVAGED" : ""}`);
       plano = step(plano, "p2", "feito");
       await supabase.from("studio_orders").update({ plano, session_id: sessionId, tokens_usados: totalTokens }).eq("id", order.id);
       supabase.rpc("increment_user_tokens", { p_user_id: order.user_id, p_amount: runRes.tokensUsed }).then((r) => {
