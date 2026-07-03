@@ -77,7 +77,13 @@ export async function runAgent(input: AgentInput): Promise<AgentRun> {
     }
   }, 5000);
 
-  try {
+  // DEADLOCK FIX: o abortController.abort() mata o child process (SIGINT visto
+  // no Fly) mas o generator do SDK pode NUNCA terminar — nem yield nem throw —
+  // deixando o `for await` pendurado para sempre e o SALVAGE nunca corre.
+  // Solução: consumir o iterador numa inner function e fazer Promise.race com
+  // um hard timer (AGENT_TOTAL + 60s de grace). Se o timer ganhar, saímos com
+  // o que temos; o generator órfão fica pendurado mas o child já morreu.
+  const consume = async (): Promise<void> => {
   for await (const msg of query({
     prompt: input.userPrompt,
     options: {
@@ -166,8 +172,32 @@ export async function runAgent(input: AgentInput): Promise<AgentRun> {
     }
     // Brief §1: sem teto de tokens. Kill-switch do dono corta processos novos.
   }
+  }; // fim consume()
+
+  // Hard timer: se o iterador não terminar (nem depois do abort), saímos na mesma.
+  // O guard interval marca timedOut + aborta o child; este race garante que a
+  // função devolve controlo mesmo com o generator pendurado.
+  const hardLimitMs = AGENT_TOTAL_MS + 60_000;
+  let hardTimer: NodeJS.Timeout | undefined;
+  const hardTimeout = new Promise<"hard-timeout">((res) => {
+    hardTimer = setTimeout(() => { timedOut = true; abortController.abort(); res("hard-timeout"); }, hardLimitMs);
+  });
+  // Também um timer curto pós-abort: se o guard abortou (timedOut) e o iterador
+  // não terminar em 30s, saímos.
+  const postAbortExit = new Promise<"post-abort">((res) => {
+    const check = setInterval(() => {
+      if (timedOut) {
+        clearInterval(check);
+        setTimeout(() => res("post-abort"), 30_000);
+      }
+    }, 5000);
+  });
+
+  try {
+    await Promise.race([consume(), hardTimeout, postAbortExit]);
   } finally {
     clearInterval(guard);
+    if (hardTimer) clearTimeout(hardTimer);
   }
 
   if (timedOut) {
