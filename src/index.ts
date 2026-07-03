@@ -91,13 +91,20 @@ async function interpretRascunho(order: OrderRow): Promise<void> {
     }
 
     // Trabalho normal: escreve intenção + card "confirmacao".
+    // Se há especificação (pedido vago → spec benchmark), guarda no campo
+    // intencao junto do resumo — o process.ts passa isto ao agente como spec
+    // aprovada, e o card mostra a lista para o 0-coder ver o que aprova.
+    const intencaoCompleta = result.especificacao && result.especificacao.length > 0
+      ? `${result.intencao}\n\nO que vou incluir:\n${result.especificacao.map((f) => `• ${f}`).join("\n")}`
+      : result.intencao;
     const upd = await supabase.from("studio_orders").update({
-      estado: "aguarda_confirmacao", intencao: result.intencao, tokens_usados: result.tokensUsed,
+      estado: "aguarda_confirmacao", intencao: intencaoCompleta, tokens_usados: result.tokensUsed,
     }).eq("id", order.id);
     if (upd.error) throw upd.error;
     await supabase.from("studio_messages").insert({
       app_id: order.app_id, order_id: order.id, user_id: order.user_id,
-      autor: "agente", tipo: "confirmacao", conteudo: { text: result.intencao },
+      autor: "agente", tipo: "confirmacao",
+      conteudo: { text: result.intencao, especificacao: result.especificacao ?? null },
     });
     await event(order.app_id, order.id, order.user_id, "order.intencao", { intencao: result.intencao, tokensUsed: result.tokensUsed });
     supabase.rpc("increment_user_tokens", { p_user_id: order.user_id, p_amount: result.tokensUsed }).then(() => {});

@@ -176,7 +176,17 @@ export async function processOrder(order: OrderRow): Promise<void> {
       } else {
       const guidance = iter === 1 ? "" : estrategiaGuidance(currentEstrategia);
       const errCtx = lastError ? `\n\n[nota interna: iteração anterior falhou com "${lastError.slice(0, 200)}" — corrige]` : "";
-      const userPrompt = guidance ? `${guidance}\n\n${order.texto}${errCtx}` : `${order.texto}${errCtx}`;
+      // Se a interpretação gerou spec benchmark (pedido vago → spec detalhada
+      // aprovada pelo user no card "Avanço?"), passa-a ao agente como a
+      // especificação REAL a implementar — não só o pedido cru.
+      const { data: orderFull } = await supabase.from("studio_orders").select("intencao").eq("id", order.id).maybeSingle();
+      const intencaoAprovada = (orderFull as { intencao?: string } | null)?.intencao;
+      const spec = intencaoAprovada && intencaoAprovada.includes("O que vou incluir:")
+        ? `\n\n--- ESPECIFICAÇÃO APROVADA PELO UTILIZADOR (implementa TUDO) ---\n${intencaoAprovada}`
+        : "";
+      const userPrompt = guidance
+        ? `${guidance}\n\n${order.texto}${spec}${errCtx}`
+        : `${order.texto}${spec}${errCtx}`;
       if (iter === 1) await log(order.app_id, order.id, order.user_id, "agente", "pensamento", "A perceber o pedido…");
       else await log(order.app_id, order.id, order.user_id, "agente", "pensamento", `A tentar outra abordagem (${currentEstrategia.replace(/_/g, " ")})…`);
       await runlog(order.id, "tool", `agent.query iter=${iter}`);
