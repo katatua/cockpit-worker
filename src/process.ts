@@ -26,6 +26,7 @@ import { nextEstrategia, estrategiaGuidance, esgotadaHumana, type Estrategia } f
 import { discoverRoutes } from "./routes-scanner.js";
 import { scheduleNextRound } from "./campaign-sweep.js";
 import { startHeartbeat } from "./heartbeat.js";
+import { gerarResumo } from "./resumo.js";
 
 const MAX_ITER = 8; // safety net anti-runaway
 
@@ -69,6 +70,8 @@ export async function processOrder(order: OrderRow): Promise<void> {
   let currentEstrategia: Estrategia = "padrao";
   let sessionId = order.session_id;
   let totalTokens = 0;
+  const allToolsUsadas: Array<{ name: string; input: unknown }> = [];
+  let allFinalText = "";
 
   try {
     for (let iter = 1; iter <= MAX_ITER; iter++) {
@@ -126,10 +129,21 @@ export async function processOrder(order: OrderRow): Promise<void> {
         readFile(path.join(worktree, "AGENTS.md"), "utf8").catch(() => ""),
         readFile(path.join(worktree, "SPEC.md"), "utf8").catch(() => ""),
       ]);
+
+      // F2 · memória por app: lições de ordens anteriores
+      const { data: appMem } = await supabase.from("studio_apps").select("aprendizagens").eq("id", app.id).single();
+      const licoes = (appMem?.aprendizagens as string[] | null) ?? [];
+      const memoriaBlock = licoes.length > 0
+        ? `--- MEMÓRIA DESTA APP (lições de ordens anteriores; segue-as) ---\n${licoes.map((l, i) => `${i + 1}. ${l}`).join("\n")}`
+        : "";
+
       const systemPrompt = [
         "És o worker do Studio a modificar código da app do 0-coder.",
+        "AUTONOMIA TOTAL: resolve todos os problemas que encontres. NUNCA peças ajuda ou clarificação ao user — decide tu com bom gosto e regista em DECISIONS.md.",
+        "Se falhas uma tool, tenta outra abordagem. Se um comando falha, lê o erro, adapta, tenta de novo. Só pares quando terminares.",
         "Segue AGENTS.md e SPEC.md do repo. Escreve código pequeno, focado, testado quando possível.",
         "Nunca inventes segredos. Nunca reportes sucesso sem editares mesmo.",
+        memoriaBlock,
         agentsMd && `--- AGENTS.md ---\n${agentsMd}`,
         specMd && `--- SPEC.md ---\n${specMd}`,
       ].filter(Boolean).join("\n\n");
@@ -181,6 +195,8 @@ export async function processOrder(order: OrderRow): Promise<void> {
       }
       totalTokens += runRes.tokensUsed;
       sessionId = runRes.sessionId;
+      allToolsUsadas.push(...runRes.toolsUsadas);
+      if (runRes.finalText) allFinalText = runRes.finalText;
       await runlog(order.id, "info", `agent tokens=${runRes.tokensUsed} · total=${totalTokens}`);
       plano = step(plano, "p2", "feito");
       await supabase.from("studio_orders").update({ plano, session_id: sessionId, tokens_usados: totalTokens }).eq("id", order.id);
@@ -276,6 +292,22 @@ export async function processOrder(order: OrderRow): Promise<void> {
       await supabase.from("studio_apps").update({ rotas }).eq("id", app.id);
       await runlog(order.id, "info", `rotas descobertas: ${rotas.join(", ")}`);
 
+      // F1 · Resumo Lovable-style — só no SUCESSO, junto do preview_pronto.
+      // F2 · adiciona lições aprendidas à memória da app.
+      const resumoRes = await gerarResumo(order.texto, allToolsUsadas, allFinalText, true, CONFIG.ANTHROPIC_API_KEY);
+      if (resumoRes) {
+        await supabase.from("studio_messages").insert({
+          app_id: order.app_id, order_id: order.id, user_id: order.user_id,
+          autor: "agente", tipo: "resumo", conteudo: resumoRes.resumo,
+        });
+        if (resumoRes.resumo.aprendizagens.length > 0) {
+          const { data: appAtual } = await supabase.from("studio_apps").select("aprendizagens").eq("id", app.id).single();
+          const antigas = (appAtual?.aprendizagens as string[] | null) ?? [];
+          const novas = [...resumoRes.resumo.aprendizagens, ...antigas].slice(0, 20); // FIFO cap 20
+          await supabase.from("studio_apps").update({ aprendizagens: novas }).eq("id", app.id);
+        }
+      }
+
       await supabase.from("studio_orders").update({
         plano, preview_url: deploy.url, preview_deploy_id: deploy.deployId, estado: "preview_pronto",
       }).eq("id", order.id);
@@ -341,7 +373,18 @@ export async function processOrder(order: OrderRow): Promise<void> {
     // Passou do MAX_ITER — safety net.
     throw new Error(esgotadaHumana("limite absoluto de iterações"));
   } catch (e) {
-    await fail(order, e instanceof Error ? e.message : String(e));
+    const motivo = e instanceof Error ? e.message : String(e);
+    // F1 · resumo de falha antes do fail() gravar erro
+    if (allToolsUsadas.length > 0 || allFinalText) {
+      const resumoFail = await gerarResumo(order.texto, allToolsUsadas, allFinalText || motivo, false, CONFIG.ANTHROPIC_API_KEY);
+      if (resumoFail) {
+        await supabase.from("studio_messages").insert({
+          app_id: order.app_id, order_id: order.id, user_id: order.user_id,
+          autor: "agente", tipo: "resumo", conteudo: resumoFail.resumo,
+        });
+      }
+    }
+    await fail(order, motivo);
   } finally {
     stopHeartbeat();
     await unlock(order.app_id);

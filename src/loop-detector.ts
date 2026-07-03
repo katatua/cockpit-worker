@@ -106,17 +106,39 @@ export function estrategiaGuidance(estrategia: Estrategia): string {
     case "padrao":
       return "";
     case "simplificar":
-      return "Já falhaste 3x nesta abordagem. Simplifica o pedido: entrega uma versão mínima que funcione. Podes deixar features avançadas para depois — regista em DECISIONS.md.";
+      return `IMPORTANTE: Já falhaste 3x nesta abordagem. Muda de estratégia:
+1. Simplifica AGORA: entrega uma versão mínima que funcione.
+2. Corta features avançadas — regista em DECISIONS.md o que ficou para depois.
+3. LEIA os erros anteriores com atenção — não repitas o que já não funcionou.
+4. Se precisas de dependência nova, INSTALA-A tu (npm install), não peças ao user.`;
     case "sem_feature_secundaria":
-      return "As abordagens anteriores falharam repetidamente. Remove qualquer feature secundária e foca no essencial. Se algo não é imprescindível, corta.";
+      return `IMPORTANTE: Muitas tentativas falharam. Nova abordagem:
+1. Remove QUALQUER feature secundária. Só o núcleo.
+2. Se um componente tem 5 partes, entrega só a mais essencial.
+3. Se um form tem 8 campos, começa com 2.
+4. Fica menor. Sempre é melhor entregar pouco que funcione do que muito partido.`;
     case "reescrever_do_zero":
-      return "Todas as tentativas anteriores falharam. Ignora o que fizeste antes. Refaz do zero, o mais simples possível, sem tocar em código que não é necessário.";
+      return `ÚLTIMA ABORDAGEM: Todas as tentativas anteriores falharam. Refaz do zero:
+1. IGNORA o que fizeste antes.
+2. Escreve o mínimo absoluto — HTML/CSS puro se preciso, sem componentes.
+3. Não uses features complexas do Next/React.
+4. Deve funcionar depois do primeiro commit. Sem excepções.`;
     case "esgotada":
       return "";
   }
 }
 
-/** Mensagem humana quando esgota — dita ao 0-coder em linguagem de pessoa. */
+/** Mensagem humana quando esgota — dita ao 0-coder em linguagem de pessoa.
+ *  Já não é seco — sugere reformulação concreta baseada no que aconteceu. */
 export function esgotadaHumana(motivoOriginal: string): string {
-  return `Tentei várias abordagens e nenhuma funcionou. O que consigo fazer agora é deixar o teu pedido em standby para revisão. Alternativa: reformula o pedido de uma forma mais simples ou parte-o em pedaços mais pequenos. (Nota técnica anotada em Decisões.)`;
+  // Sugere reformulação baseada no tipo de erro
+  const sug = /npm|build|next|package/i.test(motivoOriginal)
+    ? "Parece que há algum problema de configuração. Podes tentar pedir uma versão mais simples primeiro — sem features que precisem de dependências novas."
+    : /url|link|404|broken/i.test(motivoOriginal)
+    ? "Os links não estão a apontar bem. Diz-me exactamente que páginas queres e como devem estar ligadas."
+    : /form|input|submit/i.test(motivoOriginal)
+    ? "Parece que os formulários não estão a ser preenchidos correctamente. Descreve os campos que queres e o que deve acontecer ao submeter."
+    : "Divide o pedido em partes mais pequenas — uma peça de cada vez costuma funcionar melhor.";
+
+  return `Tentei várias abordagens (simplificar, cortar features, refazer do zero) mas nenhuma resultou. ${sug}`;
 }

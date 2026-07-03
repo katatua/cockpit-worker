@@ -19,7 +19,8 @@ export type AgentRun = {
   finalText: string;
   tokensUsed: number;
   sessionId: string | null;
-  mcpToolsFaltantes: string[]; // tools que o agente tentou usar e o BAI-MCP não expõe
+  mcpToolsFaltantes: string[];
+  toolsUsadas: Array<{ name: string; input: unknown }>; // F1 resumo Lovable-style
 };
 
 export type AgentInput = {
@@ -57,6 +58,7 @@ export async function runAgent(input: AgentInput): Promise<AgentRun> {
   let tokensUsed = 0;
   let sessionId: string | null = null;
   const mcpToolsFaltantes: string[] = [];
+  const toolsUsadas: Array<{ name: string; input: unknown }> = [];
 
   // Timeout de segurança: total 8 min OU 3 min sem mensagem nova do SDK
   // (Opus pode ficar muito tempo a raciocinar entre tool_use, especialmente
@@ -106,6 +108,7 @@ export async function runAgent(input: AgentInput): Promise<AgentRun> {
           const stream = isMcp ? "mcp" : "tool";
           const preview = JSON.stringify(c.input ?? {}).slice(0, 180);
           runlog(input.orderId, stream as "tool" | "info", `${c.name} ${preview}`).catch(() => {});
+          toolsUsadas.push({ name: c.name, input: c.input ?? {} }); // F1 resumo
 
           // Fatia B: humanizar para o chat do 0-coder.
           // Fatia C: adiciona também sub-passo ao plano.p2 (hierárquico).
@@ -171,5 +174,5 @@ export async function runAgent(input: AgentInput): Promise<AgentRun> {
     throw new Error(`agente demorou muito sem terminar (${elapsed}s)`);
   }
 
-  return { finalText, tokensUsed, sessionId, mcpToolsFaltantes };
+  return { finalText, tokensUsed, sessionId, mcpToolsFaltantes, toolsUsadas };
 }
