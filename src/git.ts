@@ -50,7 +50,11 @@ export async function commitAll(dir: string, message: string): Promise<string> {
 }
 
 export async function push(dir: string, branch: string): Promise<void> {
-  await run("git", ["push", "-u", "origin", branch], { cwd: dir });
+  // --force: branches studio/* são descartáveis e 1:1 com a ordem. Depois de
+  // um retry (re-clone do main + re-trabalho), o branch remoto antigo teria
+  // commits divergentes e um push normal falharia com non-fast-forward.
+  // NUNCA usado em main — o publish gate faz merge por outra via.
+  await run("git", ["push", "-u", "--force", "origin", branch], { cwd: dir });
 }
 
 export async function diffStat(dir: string): Promise<string> {
