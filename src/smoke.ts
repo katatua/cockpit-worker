@@ -19,6 +19,9 @@ import type { Browser, ConsoleMessage, Page } from "playwright-core";
 
 export type SmokeReport = {
   ok: boolean;
+  // Infra do worker falhou (browser não arrancou) — NÃO é problema da app do
+  // utilizador: a ordem não chumba, o dono é notificado (event smoke.skip).
+  skip?: string;
   consoleErros: string[];
   botoesTestados: number;
   botoesQuebrados: { seletor: string; motivo: string }[];
@@ -84,10 +87,13 @@ export async function smokeTest(previewUrl: string): Promise<SmokeReport> {
 
   let browser: Browser | null = null;
   try {
+    // 60s de timeout: numa máquina Fly de 1GB com o agente + npm a correr ao
+    // lado, o primeiro arranque do chromium pode passar dos 15s (visto na
+    // ordem f805aa14 — launch timeout matou um WP que estava perfeito).
     browser = await chromium.launch({
       executablePath: EXECUTABLE_PATH,
-      args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-      timeout: 15000,
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--disable-extensions"],
+      timeout: 60000,
     });
     const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
     const page = await context.newPage();
@@ -166,8 +172,16 @@ export async function smokeTest(previewUrl: string): Promise<SmokeReport> {
     if (report.formulariosQuebrados.length > 0) report.ok = false;
 
   } catch (e) {
-    report.ok = false;
-    report.consoleErros.push(`smoke geral: ${e instanceof Error ? e.message : String(e)}`);
+    const msg = e instanceof Error ? e.message : String(e);
+    if (browser === null) {
+      // O browser nem chegou a arrancar — infra do worker, não a app do
+      // utilizador. ok=true + skip: a ordem segue; o dono é notificado.
+      report.ok = true;
+      report.skip = `browser não arrancou: ${msg.slice(0, 160)}`;
+    } else {
+      report.ok = false;
+      report.consoleErros.push(`smoke geral: ${msg}`);
+    }
   } finally {
     if (browser) await browser.close().catch(() => {});
     report.duracaoMs = Date.now() - t0;

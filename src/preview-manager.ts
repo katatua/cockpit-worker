@@ -40,6 +40,12 @@ type PreviewProc = {
 
 const running = new Map<string, PreviewProc>();
 const usedPorts = new Set<number>();
+// GUARDA anti-corrida: `running` só é populado DEPOIS do clone+npm ci (que
+// demora minutos). Sem isto, cada poll do iframe durante essa janela disparava
+// outro spawnPreview — vários `git reset --hard` + `next dev` no MESMO dir a
+// matarem-se uns aos outros (visto no e2e: portas 3001/3002/3003 em corrida,
+// READY seguido de exit). Chamadas concorrentes partilham a mesma promise.
+const inflight = new Map<string, Promise<{ port: number; ready: boolean }>>();
 
 function nextPort(): number {
   for (let p = PORT_START; p <= PORT_END; p++) {
@@ -60,10 +66,14 @@ export async function ensurePreview(slug: string): Promise<{ port: number; ready
       try { await existing.readyPromise; } catch { /* proc falhou; deixa cair para spawn de novo */ }
     }
     if (existing.ready) return { port: existing.port, ready: true };
-    // Se falhou, limpa e re-spawna.
+    // Se falhou, limpa e re-spawna (abaixo, com guarda de in-flight).
     stop(slug);
   }
-  return spawnPreview(slug);
+  const emCurso = inflight.get(slug);
+  if (emCurso) return emCurso;
+  const p = spawnPreview(slug).finally(() => inflight.delete(slug));
+  inflight.set(slug, p);
+  return p;
 }
 
 async function spawnPreview(slug: string): Promise<{ port: number; ready: boolean }> {

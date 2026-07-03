@@ -304,7 +304,12 @@ export async function processOrder(order: OrderRow): Promise<void> {
         console.warn(`[${order.id.slice(0, 8)}] smoke skip:`, e.message);
         return null;
       });
-      if (smoke) {
+      if (smoke?.skip) {
+        // Infra do worker (browser não arrancou) — a ordem NÃO chumba; o dono
+        // é notificado para olhar para a máquina (§4.6: falha honesta).
+        await runlog(order.id, "stderr", `smoke SALTADO (infra): ${smoke.skip}`);
+        await event(order.app_id, order.id, order.user_id, "smoke.skip", { motivo: smoke.skip });
+      } else if (smoke) {
         await runlog(order.id, "info", `smoke: ${smoke.botoesTestados} botões, ${smoke.formulariosTestados} forms, ${smoke.consoleErros.length} erros consola, ${smoke.navegacoes} navegações (${smoke.duracaoMs}ms)`);
         for (const err of smoke.consoleErros.slice(0, 5)) await runlog(order.id, "stderr", `console: ${err}`);
         for (const b of smoke.botoesQuebrados.slice(0, 5)) await runlog(order.id, "stderr", `botão quebrado: ${b.seletor} · ${b.motivo}`);
