@@ -162,21 +162,35 @@ export async function smokeTest(previewUrl: string, rotas: string[] = ["/"]): Pr
         }
       }
 
-      // 3) Botões visíveis da rota → click com timeout curto
+      // 3) Botões visíveis da rota → click com timeout curto.
+      // §4.6 "cards não-clicáveis é a pior falha": um botão que clica SEM
+      // ERRO mas não produz efeito nenhum (sem navegação, sem mudança de DOM)
+      // é um BOTÃO MORTO — visto na landing-page do dono (CTA que não fazia
+      // nada e o smoke deixou passar). Agora exige-se efeito observável.
       const buttons = await page.locator("button:visible").all();
       for (let i = 0; i < Math.min(buttons.length, MAX_BOTOES); i++) {
         report.botoesTestados++;
         const btn = buttons[i];
         const label = `${rota}#${(await btn.textContent().catch(() => ""))?.slice(0, 30) ?? `btn${i}`}`;
         const urlBefore = page.url();
+        const domBefore = await page.evaluate("document.body.innerHTML.length").catch(() => 0) as number;
         try {
           await btn.click({ timeout: 3000, trial: false });
-          await page.waitForTimeout(500);
+          await page.waitForTimeout(700);
           const urlAfter = page.url();
+          const domAfter = await page.evaluate("document.body.innerHTML.length").catch(() => 0) as number;
           if (urlAfter !== urlBefore) {
             report.navegacoes++;
             await page.goto(urlRota, { waitUntil: "domcontentloaded", timeout: 10000 }).catch(() => {});
             await page.waitForTimeout(500);
+          } else if (domAfter === domBefore) {
+            // clique "bem-sucedido" sem QUALQUER efeito: nem navegou nem
+            // mudou o DOM → botão morto. (submit dentro de form já foi
+            // testado no passo 2; aqui só botões soltos.)
+            const dentroDeForm = await btn.evaluate("el => !!el.closest('form')").catch(() => false);
+            if (!dentroDeForm) {
+              report.botoesQuebrados.push({ seletor: label, motivo: "botão morto: clique não navega nem altera a página" });
+            }
           }
         } catch (e) {
           report.botoesQuebrados.push({ seletor: label, motivo: e instanceof Error ? e.message.slice(0, 120) : String(e) });
