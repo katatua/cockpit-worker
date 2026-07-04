@@ -50,11 +50,12 @@ export async function gerarAceitacao(intencao: string, apiKey: string): Promise<
     body: JSON.stringify({
       model: "claude-fable-5",
       max_tokens: 1500,
-      system: `Converte a intenção de uma ordem de construção web numa checklist CURTA
-(3-8 itens) de critérios VERIFICÁVEIS por inspeção do HTML:
-- tipo "texto": um texto que TEM de aparecer na página (usa palavras da intenção, não inventes)
-- tipo "elemento": um elemento que TEM de existir (button, form, a, h1, input…)
-Só critérios objetivos. Nada de estética/subjetivo.`,
+      system: `Converte a intenção numa checklist CURTA (3-6 itens) de critérios
+VERIFICÁVEIS e ROBUSTOS. Verifica RESULTADOS VISÍVEIS ao utilizador, NUNCA
+detalhes de IMPLEMENTAÇÃO (a mesma feature pode ser feita de várias formas):
+- tipo "texto": um texto/rótulo que o utilizador deve ver (palavras da intenção, não inventes)
+- tipo "elemento": SÓ elementos estruturais genéricos e universais — button, form, a, h1, input, table, img. PROIBIDO exigir video, iframe, canvas, svg, audio ou tags específicas de implementação.
+Prefere critérios de TEXTO. Poucos e essenciais. Nada de estética/subjetivo nem de COMO está feito por dentro.`,
       tools: [TOOL],
       tool_choice: { type: "tool", name: "definir_criterios" },
       messages: [{ role: "user", content: intencao }],

@@ -108,9 +108,15 @@ export async function smokeTest(previewUrl: string, rotas: string[] = ["/"]): Pr
     const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
     const page = await context.newPage();
 
-    // Captura erros de consola do próprio site.
+    // Captura erros de consola do próprio site — MAS ignora ruído benigno
+    // (favicon/manifest/ícones em falta, recursos externos). Um favicon 404 NÃO
+    // é uma app partida; fazer a app chumbar por isso prendia o agente num loop.
+    const CONSOLE_BENIGNO = /favicon|apple-touch-icon|manifest\.(json|webmanifest)|icon-\d+|robots\.txt|\/sw\.js/i;
     page.on("console", (msg: ConsoleMessage) => {
-      if (msg.type() === "error") report.consoleErros.push(msg.text().slice(0, 200));
+      if (msg.type() !== "error") return;
+      const txt = msg.text();
+      if (CONSOLE_BENIGNO.test(txt)) return;
+      report.consoleErros.push(txt.slice(0, 200));
     });
     page.on("pageerror", (err) => report.consoleErros.push(`pageerror: ${err.message.slice(0, 200)}`));
 
@@ -174,22 +180,25 @@ export async function smokeTest(previewUrl: string, rotas: string[] = ["/"]): Pr
         const label = `${rota}#${(await btn.textContent().catch(() => ""))?.slice(0, 30) ?? `btn${i}`}`;
         const urlBefore = page.url();
         const domBefore = await page.evaluate("document.body.innerHTML.length").catch(() => 0) as number;
+        const scrollBefore = await page.evaluate("window.scrollY").catch(() => 0) as number;
         try {
           await btn.click({ timeout: 3000, trial: false });
           await page.waitForTimeout(700);
           const urlAfter = page.url();
           const domAfter = await page.evaluate("document.body.innerHTML.length").catch(() => 0) as number;
+          const scrollAfter = await page.evaluate("window.scrollY").catch(() => 0) as number;
+          const fezScroll = Math.abs(scrollAfter - scrollBefore) >= 4; // scroll-to-secção é efeito VÁLIDO
           if (urlAfter !== urlBefore) {
             report.navegacoes++;
             await page.goto(urlRota, { waitUntil: "domcontentloaded", timeout: 10000 }).catch(() => {});
             await page.waitForTimeout(500);
-          } else if (domAfter === domBefore) {
-            // clique "bem-sucedido" sem QUALQUER efeito: nem navegou nem
-            // mudou o DOM → botão morto. (submit dentro de form já foi
-            // testado no passo 2; aqui só botões soltos.)
+          } else if (domAfter === domBefore && !fezScroll) {
+            // clique "bem-sucedido" sem QUALQUER efeito: nem navegou, nem mudou o
+            // DOM, nem fez scroll → botão morto de verdade. (Um botão que rola até
+            // uma secção — nav âncora — é VÁLIDO e já não é marcado morto.)
             const dentroDeForm = await btn.evaluate("el => !!el.closest('form')").catch(() => false);
             if (!dentroDeForm) {
-              report.botoesQuebrados.push({ seletor: label, motivo: "botão morto: clique não navega nem altera a página" });
+              report.botoesQuebrados.push({ seletor: label, motivo: "botão morto: clique não navega, não altera a página nem faz scroll" });
             }
           }
         } catch (e) {
