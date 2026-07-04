@@ -60,7 +60,16 @@ export function humanizeToolUse(name: string, input: ToolInput): string | null {
     case "Grep":
       return `A procurar por padrões`;
     case "Bash": {
-      const cmd = String(input.command ?? "").slice(0, 60);
+      const cmdFull = String(input.command ?? "");
+      const cmd = cmdFull.slice(0, 60);
+      // IMAGENS: é o momento premium (estilo Base44 "Generated 8 images").
+      if (/studio-image\.mjs/i.test(cmdFull)) {
+        if (/--batch/i.test(cmdFull)) return `A gerar as imagens cinematográficas do site`;
+        // modo único: extrai o prompt (1º argumento entre aspas) para nomear.
+        const m = cmdFull.match(/studio-image\.mjs\s+["']([^"']{3,70})/i);
+        const nome = m ? m[1].replace(/,.*$/, "").trim() : null; // 1ª cláusula do prompt
+        return nome ? `A gerar a imagem: ${nome}` : `A gerar uma imagem cinematográfica`;
+      }
       if (/^git /i.test(cmd)) return null; // git é ruído para o 0-coder
       if (/npm (install|ci|add)/i.test(cmd)) return `A preparar os componentes`;
       if (/npm run (build|dev)/i.test(cmd)) return `A construir`;
