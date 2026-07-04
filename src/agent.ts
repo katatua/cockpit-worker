@@ -79,11 +79,17 @@ export async function runAgent(input: AgentInput): Promise<AgentRun> {
   let timedOut = false;
   let timeoutMotivo = "";
   const abortController = new AbortController();
+  // DESCOBERTA (instrumentação C3.3 em produção): o "hang" era o idle_4min a
+  // matar Bash LONGO e saudável (npm run build leva minutos e o SDK não emite
+  // mensagens durante a execução de uma tool). Com tool pendente, o silêncio
+  // é ESPERADO — o limite passa a 12 min por tool; sem tool pendente, 4 min.
+  const TOOL_PENDING_MS = 12 * 60 * 1000;
   const guard = setInterval(() => {
     const now = Date.now();
-    if (now - startAt > AGENT_TOTAL_MS || now - lastMsgAt > AGENT_IDLE_MS) {
+    const idleLimit = pendingTool ? TOOL_PENDING_MS : AGENT_IDLE_MS;
+    if (now - startAt > AGENT_TOTAL_MS || now - lastMsgAt > idleLimit) {
       timedOut = true;
-      timeoutMotivo = now - startAt > AGENT_TOTAL_MS ? "total_45min" : "idle_4min";
+      timeoutMotivo = now - startAt > AGENT_TOTAL_MS ? "total_45min" : (pendingTool ? `tool_${pendingTool}_12min` : "idle_4min");
       // C3.3: gravar o estado da sessão ANTES de matar — o watchdog deixa de
       // ser rede cega e passa a instrumento de diagnóstico.
       if (input.orderId) {
