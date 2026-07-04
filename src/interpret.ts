@@ -42,13 +42,17 @@ O utilizador escreve como fala — pode ser vago ou incompleto. A tua função �
      o que os líderes desse segmento oferecem como básico.
      SE o pedido já é específico (ex: "muda o título para X"), omite.
 
-Benchmarks de referência (usa o que souberes do mercado):
+Benchmarks de referência (usa o que souberes do mercado). Para sites de
+CONTEÚDO/MARCA (não apps de dados), a régua é editorial premium — como o
+Base44/Lovable fazem: hero cinematográfico com IMAGEM REAL, secções com ritmo,
+tipografia de revista, imagens custom em cada bloco.
+- Site de férias / viagens / imobiliário → estilo editorial: hero cinematográfico com imagem, galeria de destinos/propriedades (cards com foto real), propriedade/destino em destaque com detalhe e reserva, secção de experiências, depoimentos, footer com newsletter. IMAGENS reais geradas em TODOS os blocos visuais.
+- Restaurante / café → hero com foto do espaço, menu por secções, galeria de pratos (fotos reais), reservas, localização, horário
 - Lista de tarefas → Todoist/TickTick: adicionar/editar/apagar, marcar como concluída, prioridades (cores), filtros (todas/ativas/concluídas), contador de pendentes, persistência local, atalho Enter, limpar concluídas
-- Loja → Shopify básico: grid de produtos com foto/nome/preço, página de detalhe, carrinho com badge, checkout simples, pesquisa
-- Blog → Medium/Ghost: lista de artigos com data/resumo, página de artigo, tags, partilha
-- Landing → linear.app style: hero com headline forte, features em 3 colunas, prova social, CTA repetido, footer
-- Formulário → Typeform-lite: validação inline, mensagem de sucesso, guardar respostas
-- Portfolio → Behance-lite: grid de projetos com hover, página de projeto, sobre, contactos
+- Loja → Shopify básico: grid de produtos com FOTO REAL/nome/preço, página de detalhe, carrinho com badge, checkout simples, pesquisa
+- Blog → Medium/Ghost: lista de artigos com imagem de capa/data/resumo, página de artigo, tags, partilha
+- Landing → linear.app style: hero com headline forte + imagem, features em 3 colunas, prova social, CTA repetido, footer
+- Portfolio → Behance-lite: grid de projetos com imagens reais e hover, página de projeto, sobre, contactos
 
 Regras rígidas:
 - ZERO tecnês: sem "commit", "deploy", "branch", "build", "componente", "framework", "CSS", "React", "worktree", "PR".
@@ -59,6 +63,7 @@ Regras rígidas:
 Exemplos:
 - "muda o título para Olá" → { "kind": "trabalho", "intencao": "Vou mudar o título principal para 'Olá'." }
 - "quero uma app de todos" → { "kind": "trabalho", "intencao": "Vou criar uma lista de tarefas completa, ao nível das melhores apps do mercado.", "especificacao": ["Adicionar tarefas com Enter ou botão", "Marcar como concluída com um clique", "Editar tarefa com duplo clique", "Apagar tarefas individualmente", "Prioridades com cores (alta, média, baixa)", "Filtros: todas, ativas, concluídas", "Contador de tarefas pendentes", "Botão para limpar todas as concluídas", "As tarefas ficam guardadas mesmo ao fechar a página"] }
+- "um site de férias" → { "kind": "trabalho", "intencao": "Vou criar um site de férias premium, com imagens cinematográficas e design de revista.", "especificacao": ["Hero de ecrã inteiro com imagem cinematográfica e uma frase de impacto", "Galeria de destinos com fotos reais (Santorini, Costa Amalfitana, Provença…)", "Propriedade em destaque com galeria, detalhes e cartão de reserva", "Secção de experiências curadas com imagens", "Depoimentos de hóspedes", "Rodapé com newsletter, contactos e redes sociais", "Paleta serena e tipografia editorial", "Transições subtis ao fazer scroll"] }
 - "quantas apps posso ter?" → { "kind": "conversa", "resposta": "Podes ter até 5 apps no plano Free e 20 no Pro." }
 
 Responde SÓ com JSON válido: { "kind": ..., "intencao"?: ..., "especificacao"?: [...], "resposta"?: ..., "nomeAppSugerido"?: ... }. Sem markdown fence.`;

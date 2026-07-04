@@ -156,13 +156,16 @@ export async function processOrder(order: OrderRow): Promise<void> {
         : "";
 
       const systemPrompt = [
-        "És o worker do Studio a modificar código da app do 0-coder.",
+        "És o worker do Studio a construir apps web premium para não-programadores. O padrão de qualidade é o Lovable / Base44: design editorial, imagens reais, animação subtil, nada de placeholders.",
         "AUTONOMIA TOTAL: resolve todos os problemas que encontres. NUNCA peças ajuda ou clarificação ao user — decide tu com bom gosto.",
         "Se falhas uma tool, tenta outra abordagem. Se um comando falha, lê o erro, adapta, tenta de novo. Só pares quando terminares.",
-        // Fix eficiência: código PRIMEIRO, burocracia DEPOIS. O agente anterior
-        // gastava minutos em SPEC/DECISIONS/CHANGELOG antes de tocar em código
-        // e era morto pelo timeout a meio.
-        "ORDEM DE TRABALHO OBRIGATÓRIA:\n1. Implementa o código do pedido PRIMEIRO (app/*.tsx, estilos).\n2. Verifica que compila (npm run build) e corrige se preciso.\n3. SÓ NO FIM, se sobrar tempo: atualiza SPEC.md e CHANGELOG.md em 1-2 edições rápidas. NÃO perfeciones a documentação — o código entregue vale mais.",
+        // QUALIDADE PREMIUM (2026-07-04): o que separa «Bem-vindo» de Base44.
+        "QUALIDADE VISUAL (obrigatória — o output tem de parecer feito por um estúdio de design):",
+        "- IMAGENS REAIS: gera-as com `node scripts/studio-image.mjs \"<prompt em INGLÊS, detalhado, cinematográfico>\" public/images/<nome>.webp <aspect>` (aspect: 16:9, 4:5, 1:1, 3:2). Cada imagem leva ~2s. Gera as que a página precisar (hero, cards, galeria) e usa-as com <img src=\"/images/...\"> ou next/image. NUNCA uses placeholder.com, via.placeholder, unsplash source aleatório, nem divs de cor sólida onde devia haver foto.",
+        "- DESIGN EDITORIAL: usa a tipografia display (serif, var --font-display) para títulos e a sans para corpo. Muito whitespace, hierarquia clara, uma paleta coerente (ajusta os tokens em app/globals.css ao tema). framer-motion já está instalado — usa transições subtis (fade/slide no scroll).",
+        "- Layout rico: hero de altura generosa, secções com ritmo, grid assimétrico quando fizer sentido, footer completo. Evita a página centrada de uma coluna só.",
+        "- TODOS os botões e links têm de FAZER algo (navegar, abrir, submeter, scrollar até uma secção). Um botão morto é um bug.",
+        "ORDEM DE TRABALHO:\n1. Se a página precisa de imagens, GERA-AS primeiro (podes gerar várias — cada uma é um comando).\n2. Implementa o código (app/*.tsx, componentes, estilos) com qualidade editorial.\n3. `npm run build` e corrige até compilar.\n4. Só no fim, se sobrar tempo: 1-2 edições a SPEC.md/CHANGELOG.md. O código e o design valem mais que a documentação.",
         "Nunca inventes segredos. Nunca reportes sucesso sem editares mesmo.",
         memoriaBlock,
         agentsMd && `--- AGENTS.md ---\n${agentsMd}`,
