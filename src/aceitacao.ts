@@ -95,13 +95,46 @@ async function resolverRotas(previewUrl: string, rotas: string[]): Promise<strin
  * features vivem em sub-rotas (comentários em /jogos/[id], tabelas em /grupos).
  * Verificar só "/" dava falsos "página incompleta" e queimava iterações.
  */
+const stripTags = (html: string): string =>
+  html.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+
+/**
+ * Fallback SEMÂNTICO (Haiku, barato) para critérios de TEXTO que falham o check
+ * determinístico. O gerador pode pedir "Próximos jogos" e a app dizer "por jogar/
+ * calendário" — o mesmo conceito com palavras diferentes. Uma re-iteração do
+ * agente custa ~10min; isto custa ~2s. Devolve o conjunto de critérios satisfeitos.
+ */
+async function validarTextoSemantico(reprovados: Criterio[], textoPagina: string, apiKey: string): Promise<Set<Criterio>> {
+  const ok = new Set<Criterio>();
+  if (!reprovados.length || !textoPagina.trim() || !apiKey) return ok;
+  const lista = reprovados.map((c, k) => `${k + 1}. ${c.descricao}`).join("\n");
+  try {
+    const r = await fetch(API, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 200,
+        system: "Verificas se o TEXTO DE UMA PÁGINA satisfaz requisitos, MESMO com palavras diferentes (ex.: 'jogos que faltam' ou 'calendário' satisfazem 'próximos jogos'; 'previsão' satisfaz 'previsão do utilizador'). Só marcas satisfeito se o conceito estiver MESMO presente. Responde SÓ com os números dos requisitos satisfeitos separados por vírgulas, ou 'nenhum'.",
+        messages: [{ role: "user", content: `TEXTO DA PÁGINA:\n${textoPagina}\n\nREQUISITOS:\n${lista}` }],
+      }),
+    });
+    if (!r.ok) return ok;
+    const j = await r.json() as { content: { type: string; text?: string }[] };
+    const txt = j.content.find((c) => c.type === "text")?.text ?? "";
+    for (const m of txt.matchAll(/\d+/g)) { const idx = parseInt(m[0], 10) - 1; if (reprovados[idx]) ok.add(reprovados[idx]); }
+  } catch { /* sem LLM → mantém-se o veredicto determinístico */ }
+  return ok;
+}
+
 export async function validarAceitacao(
   previewUrl: string,
   criterios: Criterio[],
   orderId: string,
   rotasApp: string[] = ["/"],
+  apiKey?: string,
 ): Promise<{ ok: boolean; falhas: string[] }> {
-  const falhas: string[] = [];
   const cacheHtml = new Map<string, string>();
   const norm = (s: string) => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/\s+/g, " ");
 
@@ -128,6 +161,7 @@ export async function validarAceitacao(
   // Conjunto de rotas concretas para o fallback "existe algures na app".
   const rotasConcretas = await resolverRotas(previewUrl, rotasApp.length ? rotasApp : ["/"]);
 
+  const reprovados: Criterio[] = [];
   for (const c of criterios) {
     const rota = c.rota.startsWith("/") ? c.rota : `/${c.rota}`;
     // 1) rota atribuída pelo gerador
@@ -139,8 +173,19 @@ export async function validarAceitacao(
         if (testa(await fetchHtml(rc), c)) { passou = true; break; }
       }
     }
-    if (!passou) falhas.push(`${c.descricao} (${c.tipo}: "${c.valor}")`);
+    if (!passou) reprovados.push(c);
   }
+
+  // 3) fallback SEMÂNTICO só para os TEXTOS reprovados (evita re-iterações caras
+  //    por fraseado diferente). Elementos ficam sempre determinísticos.
+  const textoReprovado = reprovados.filter((c) => c.tipo === "texto");
+  let satisfeitos = new Set<Criterio>();
+  if (textoReprovado.length && apiKey) {
+    const textoPagina = [...cacheHtml.values()].map(stripTags).join(" \n ").slice(0, 7000);
+    satisfeitos = await validarTextoSemantico(textoReprovado, textoPagina, apiKey);
+  }
+
+  const falhas = reprovados.filter((c) => !satisfeitos.has(c)).map((c) => `${c.descricao} (${c.tipo}: "${c.valor}")`);
   await runlog(orderId, "info", `aceitação: ${criterios.length - falhas.length}/${criterios.length} critérios OK${falhas.length ? " · em falta: " + falhas.slice(0, 3).join("; ") : ""}`);
   return { ok: falhas.length === 0, falhas };
 }

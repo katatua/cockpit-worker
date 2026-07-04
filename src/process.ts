@@ -372,7 +372,7 @@ export async function processOrder(order: OrderRow): Promise<void> {
         if (criterios.length > 0) {
           // rotasSmoke = rotas reais da app; o validador aceita a feature em
           // QUALQUER rota (não só na atribuída pelo LLM, que tende a ser "/").
-          const val = await validarAceitacao(deploy.url, criterios, order.id, rotasSmoke);
+          const val = await validarAceitacao(deploy.url, criterios, order.id, rotasSmoke, CONFIG.ANTHROPIC_API_KEY);
           if (!val.ok) {
             lastError = `página incompleta: ${val.falhas.slice(0, 3).join("; ")}`;
             await log(order.app_id, order.id, order.user_id, "agente", "erro_humano",
