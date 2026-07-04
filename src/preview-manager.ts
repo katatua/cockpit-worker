@@ -36,6 +36,8 @@ type PreviewProc = {
   lastActive: number;
   ready: boolean;
   readyPromise: Promise<void>;
+  branch: string;    // C1.2: a branch que este dev server está a servir
+  lastPull: number;  // C1: throttle do refresh (fetch+reset) por pedido
 };
 
 const running = new Map<string, PreviewProc>();
@@ -57,26 +59,48 @@ function nextPort(): number {
 /**
  * Devolve a porta interna do dev server para este slug — arranca-o se ainda
  * não está a correr, espera que fique READY. Marca lastActive.
+ *
+ * C1.2 (delta 2026-07-04): o dev server serve a BRANCH pedida (a da ordem
+ * ativa), nunca cegamente main. Se está a correr noutra branch, reinicia na
+ * certa. Pedidos com a mesma branch fazem refresh throttled (fetch+reset a
+ * cada ≥20s) — o próximo hot-reload do Next apanha os commits do agente.
  */
-export async function ensurePreview(slug: string): Promise<{ port: number; ready: boolean }> {
+export async function ensurePreview(slug: string, branch = "main"): Promise<{ port: number; ready: boolean }> {
   const existing = running.get(slug);
   if (existing) {
     existing.lastActive = Date.now();
-    if (!existing.ready) {
-      try { await existing.readyPromise; } catch { /* proc falhou; deixa cair para spawn de novo */ }
+    if (existing.branch !== branch) {
+      // C1.2: ordem ativa mudou de branch → reinicia na branch certa.
+      console.log(`[preview:${slug}] branch ${existing.branch} → ${branch} · reiniciar`);
+      stop(slug);
+    } else {
+      if (!existing.ready) {
+        try { await existing.readyPromise; } catch { /* proc falhou; respawn abaixo */ }
+      }
+      if (existing.ready) {
+        refreshBranch(existing).catch(() => {});
+        return { port: existing.port, ready: true };
+      }
+      stop(slug);
     }
-    if (existing.ready) return { port: existing.port, ready: true };
-    // Se falhou, limpa e re-spawna (abaixo, com guarda de in-flight).
-    stop(slug);
   }
   const emCurso = inflight.get(slug);
   if (emCurso) return emCurso;
-  const p = spawnPreview(slug).finally(() => inflight.delete(slug));
+  const p = spawnPreview(slug, branch).finally(() => inflight.delete(slug));
   inflight.set(slug, p);
   return p;
 }
 
-async function spawnPreview(slug: string): Promise<{ port: number; ready: boolean }> {
+/** C1: refresh throttled da branch em curso — fetch+reset; o Next dev faz o resto. */
+async function refreshBranch(rec: PreviewProc): Promise<void> {
+  if (Date.now() - rec.lastPull < 20_000) return;
+  rec.lastPull = Date.now();
+  const dir = join(APPS_ROOT, rec.slug);
+  await spawnPromise("git", ["-C", dir, "fetch", "--depth", "1", "origin", rec.branch]).catch(() => {});
+  await spawnPromise("git", ["-C", dir, "reset", "--hard", `origin/${rec.branch}`]).catch(() => {});
+}
+
+async function spawnPreview(slug: string, branch = "main"): Promise<{ port: number; ready: boolean }> {
   const app = await loadApp(slug);
   if (!app) throw new Error(`preview: app ${slug} não existe`);
   if (!app.github_repo) throw new Error(`preview: ${slug} sem github_repo`);
@@ -90,14 +114,16 @@ async function spawnPreview(slug: string): Promise<{ port: number; ready: boolea
 
   const alreadyCloned = await access(join(dir, ".git")).then(() => true).catch(() => false);
 
-  console.log(`[preview:${slug}] a arrancar em porta ${port} · ${alreadyCloned ? "pull" : "clone"} de ${app.github_repo}`);
+  console.log(`[preview:${slug}] a arrancar em porta ${port} · branch=${branch} · ${alreadyCloned ? "pull" : "clone"} de ${app.github_repo}`);
   try {
+    // C1.2: SEMPRE a branch pedida — fetch + checkout + reset a origin/<branch>.
     if (alreadyCloned) {
-      await spawnPromise("git", ["-C", dir, "fetch", "--depth", "1", "origin", "main"]);
-      await spawnPromise("git", ["-C", dir, "reset", "--hard", "origin/main"]);
+      await spawnPromise("git", ["-C", dir, "fetch", "origin", branch]);
+      await spawnPromise("git", ["-C", dir, "checkout", "-B", branch, `origin/${branch}`]);
+      await spawnPromise("git", ["-C", dir, "reset", "--hard", `origin/${branch}`]);
     } else {
       await cleanWorktree(""); // no-op para tmp — só garante que o path base existe
-      await spawnPromise("git", ["clone", "--depth", "1", authedRepoUrl(app.github_repo), dir]);
+      await spawnPromise("git", ["clone", "--branch", branch, "--single-branch", authedRepoUrl(app.github_repo), dir]);
     }
     // Install deps (idempotente — npm ci usa lockfile; senão npm install).
     // SELF-HEAL: um OOM a meio de `npm install` deixa package-lock.json
@@ -130,7 +156,7 @@ async function spawnPreview(slug: string): Promise<{ port: number; ready: boolea
   let resolveReady: () => void;
   let rejectReady: (e: Error) => void;
   const readyPromise = new Promise<void>((res, rej) => { resolveReady = res; rejectReady = rej; });
-  const rec: PreviewProc = { slug, appId: app.id, port, proc, startedAt: Date.now(), lastActive: Date.now(), ready: false, readyPromise };
+  const rec: PreviewProc = { slug, appId: app.id, port, proc, startedAt: Date.now(), lastActive: Date.now(), ready: false, readyPromise, branch, lastPull: Date.now() };
   running.set(slug, rec);
 
   // Deteta "Ready" na stdout do Next para saber que aceita conexões.
@@ -187,10 +213,13 @@ export function touch(slug: string): void {
   if (rec) rec.lastActive = Date.now();
 }
 
-/** Devolve porta se dev server para esse slug está ready — usado pelo router. */
-export function portOf(slug: string): number | null {
+/** Devolve porta se dev server para esse slug está ready — usado pelo router.
+ *  C1.2: com `branch`, só devolve se o servidor está NA branch certa. */
+export function portOf(slug: string, branch?: string): number | null {
   const rec = running.get(slug);
-  return rec?.ready ? rec.port : null;
+  if (!rec?.ready) return null;
+  if (branch && rec.branch !== branch) return null;
+  return rec.port;
 }
 
 /** Idle sweeper — corre a cada 60s no index.ts. */

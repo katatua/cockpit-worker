@@ -67,6 +67,26 @@ async function lastVercelPreview(slug: string): Promise<string | null> {
   return (order as { preview_url: string | null } | null)?.preview_url ?? null;
 }
 
+/**
+ * C1.1/C1.2: a branch que o dev server deve servir = a da ordem ATIVA da app
+ * (em_execucao mais recente com branch). Sem ordem ativa → main (estado
+ * publicado). É isto que garante que o utilizador vê a app a ganhar forma.
+ */
+async function activeBranch(slug: string): Promise<string> {
+  const { data: app } = await supabase.from("studio_apps").select("id").eq("slug", slug).maybeSingle();
+  if (!app) return "main";
+  const { data: order } = await supabase
+    .from("studio_orders")
+    .select("branch")
+    .eq("app_id", (app as { id: string }).id)
+    .eq("estado", "em_execucao")
+    .not("branch", "is", null)
+    .order("updated_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  return (order as { branch: string | null } | null)?.branch ?? "main";
+}
+
 function parseSlugPath(url: string): { slug: string; rest: string } | null {
   const m = url.match(/^\/preview\/([^/?]+)(\/[^?]*)?(\?.*)?$/);
   if (!m) return null;
@@ -89,12 +109,14 @@ async function handlePreview(req: IncomingMessage, res: ServerResponse): Promise
   if (!auth.ok) { sendJson(res, 401, { error: `auth: ${auth.motivo}` }); return; }
   if (!(await ownsApp(auth.userId!, slug))) { sendJson(res, 403, { error: "não és dono desta app" }); return; }
 
-  // Se dev server já está ready, proxy directo. Senão, tenta arrancar em background
-  // e devolve o Vercel preview URL como fallback imediato.
-  let port = portOf(slug);
+  // C1: o dev server serve a branch da ordem ativa (não main às cegas).
+  const branch = await activeBranch(slug);
+  // Se dev server já está ready NA BRANCH CERTA, proxy directo. Senão,
+  // arranca em background e devolve estado de carregamento honesto.
+  let port = portOf(slug, branch);
   if (!port) {
     // Fire-and-forget: começa o dev server; o próximo request usa-o.
-    ensurePreview(slug).catch((e) => console.warn(`[preview:${slug}] arranque falhou: ${e.message}`));
+    ensurePreview(slug, branch).catch((e) => console.warn(`[preview:${slug}] arranque falhou: ${e.message}`));
     const vercel = await lastVercelPreview(slug);
     if (vercel) {
       // Redirect 302 para o Vercel URL, preservando o rest do path (sem o /?t=…).
