@@ -12,13 +12,14 @@
  *   - Estratégias esgotadas → falhou com erro_humano com alternativa
  *   - MAX_ITER (safety net absoluto contra runaway)
  */
-import { readFile, access, rm } from "node:fs/promises";
+import { readFile, access, rm, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { spawnPromise } from "./spawn-helpers.js";
 import { supabase, tryLock, unlock, log, event, runlog, resetRunlogSeq, type OrderRow, type AppRow, type Plano } from "./db.js";
 import { CONFIG } from "./config.js";
 import { cleanWorktree, shallowClone, createBranch, hasChanges, commitAll, push, diffStat } from "./git.js";
 import { runAgent } from "./agent.js";
+import { STUDIO_IMAGE_SCRIPT } from "./image-script.js";
 import { gerarAceitacao, validarAceitacao } from "./aceitacao.js";
 import { ensurePreview } from "./preview-manager.js";
 import { waitForPreviewDeploy } from "./vercel.js";
@@ -108,6 +109,16 @@ export async function processOrder(order: OrderRow): Promise<void> {
         await shallowClone(app.github_repo, worktree);
         await createBranch(worktree, branch);
         await runlog(order.id, "stdout", `branch criada: ${branch}`);
+        // Self-heal: garante o gerador de imagens na versão mais recente (fal.ai+
+        // Replicate paralelo + escolha de modelo). Apps criadas antes desta versão
+        // teriam o script antigo no repo; assim TODAS beneficiam, não só as novas.
+        try {
+          await mkdir(path.join(worktree, "scripts"), { recursive: true });
+          await writeFile(path.join(worktree, "scripts", "studio-image.mjs"), STUDIO_IMAGE_SCRIPT);
+          await runlog(order.id, "info", "gerador de imagens sincronizado (versão paralela + modelos)");
+        } catch (e) {
+          await runlog(order.id, "stderr", `sync do gerador de imagens falhou: ${e instanceof Error ? e.message.slice(0, 120) : String(e)}`);
+        }
         plano = step(plano, "p1", "feito"); await supabase.from("studio_orders").update({ plano, branch }).eq("id", order.id);
       } else {
         // Iteração incremental: reutiliza worktree, agente vai por cima do commit anterior.
