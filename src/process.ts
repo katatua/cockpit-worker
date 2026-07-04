@@ -19,6 +19,7 @@ import { supabase, tryLock, unlock, log, event, runlog, resetRunlogSeq, type Ord
 import { CONFIG } from "./config.js";
 import { cleanWorktree, shallowClone, createBranch, hasChanges, commitAll, push, diffStat } from "./git.js";
 import { runAgent } from "./agent.js";
+import { gerarAceitacao, validarAceitacao } from "./aceitacao.js";
 import { waitForPreviewDeploy } from "./vercel.js";
 import { checkQuality } from "./quality.js";
 import { smokeTest } from "./smoke.js";
@@ -341,6 +342,35 @@ export async function processOrder(order: OrderRow): Promise<void> {
         console.warn(`[${order.id.slice(0, 8)}] smoke skip:`, e.message);
         return null;
       });
+      // --- (6c) C4.2: aceitação derivada da intenção — apanha "incompleta" ---
+      {
+        const { data: oAce } = await supabase.from("studio_orders").select("aceitacao, intencao").eq("id", order.id).maybeSingle();
+        let criterios = (oAce as { aceitacao?: import("./aceitacao.js").Criterio[] } | null)?.aceitacao ?? null;
+        const intencaoBase = (oAce as { intencao?: string } | null)?.intencao ?? order.texto;
+        if (!criterios) {
+          try {
+            criterios = await gerarAceitacao(intencaoBase, CONFIG.ANTHROPIC_API_KEY);
+            await supabase.from("studio_orders").update({ aceitacao: criterios }).eq("id", order.id);
+            await runlog(order.id, "info", `aceitação: ${criterios.length} critérios gerados da intenção`);
+          } catch (e) {
+            await runlog(order.id, "stderr", `aceitação: geração falhou (${e instanceof Error ? e.message.slice(0, 100) : e}) — segue sem checklist`);
+            criterios = [];
+          }
+        }
+        if (criterios.length > 0) {
+          const val = await validarAceitacao(deploy.url, criterios, order.id);
+          if (!val.ok) {
+            lastError = `página incompleta: ${val.falhas.slice(0, 3).join("; ")}`;
+            await log(order.app_id, order.id, order.user_id, "agente", "erro_humano",
+              `Ainda falta parte do que combinámos (${val.falhas.length} item${val.falhas.length > 1 ? "s" : ""}). Vou completar.`);
+            const nx = await nextEstrategia(order.id, lastError);
+            currentEstrategia = nx.estrategia;
+            if (nx.esgotada) throw new Error(esgotadaHumana(lastError));
+            continue;
+          }
+        }
+      }
+
       if (smoke?.skip) {
         // Infra do worker (browser não arrancou) — a ordem NÃO chumba; o dono
         // é notificado para olhar para a máquina (§4.6: falha honesta).
