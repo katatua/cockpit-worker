@@ -66,24 +66,80 @@ Só critérios objetivos. Nada de estética/subjetivo.`,
   return (tu?.input?.criterios ?? []).slice(0, 8).map((c) => ({ ...c, rota: c.rota || "/" }));
 }
 
-/** Valida DETERMINISTICAMENTE a checklist contra o deploy. */
-export async function validarAceitacao(previewUrl: string, criterios: Criterio[], orderId: string): Promise<{ ok: boolean; falhas: string[] }> {
+/**
+ * Resolve rotas dinâmicas (com `[seg]`) a uma instância CONCRETA, seguindo o 1º
+ * link do "pai" que entra no segmento. Ex.: `/jogos/[id]` → fetch `/jogos`,
+ * apanha `href="/jogos/42"`. Rotas estáticas passam intactas. Sem instância → cai.
+ */
+async function resolverRotas(previewUrl: string, rotas: string[]): Promise<string[]> {
+  const out: string[] = [];
+  for (const rota of rotas) {
+    if (!rota.includes("[")) { out.push(rota); continue; }
+    const prefixo = rota.slice(0, rota.indexOf("[")); // ex.: "/jogos/"
+    const pai = prefixo.replace(/\/$/, "") || "/";     // ex.: "/jogos"
+    const r = await fetch(`${previewUrl}${pai === "/" ? "" : pai}`, { signal: AbortSignal.timeout(15000) }).catch(() => null);
+    const html = r?.ok ? await r.text() : "";
+    const esc = prefixo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const m = html.match(new RegExp(`href=["'](${esc}[^"'/][^"']*)["']`, "i"));
+    if (m) out.push(m[1]);
+  }
+  return out;
+}
+
+/**
+ * Valida DETERMINISTICAMENTE a checklist contra o deploy.
+ *
+ * ROBUSTEZ MULTI-PÁGINA (fix 2026-07-04): um critério passa se for satisfeito na
+ * rota ATRIBUÍDA **ou em QUALQUER rota descoberta da app**. O gerador (LLM) só vê
+ * o texto da intenção e tende a pôr tudo em "/", mas num site multi-página as
+ * features vivem em sub-rotas (comentários em /jogos/[id], tabelas em /grupos).
+ * Verificar só "/" dava falsos "página incompleta" e queimava iterações.
+ */
+export async function validarAceitacao(
+  previewUrl: string,
+  criterios: Criterio[],
+  orderId: string,
+  rotasApp: string[] = ["/"],
+): Promise<{ ok: boolean; falhas: string[] }> {
   const falhas: string[] = [];
   const cacheHtml = new Map<string, string>();
   const norm = (s: string) => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/\s+/g, " ");
 
+  const fetchHtml = async (rota: string): Promise<string> => {
+    if (cacheHtml.has(rota)) return cacheHtml.get(rota)!;
+    const r = await fetch(`${previewUrl}${rota === "/" ? "" : rota}`, { signal: AbortSignal.timeout(20000) }).catch(() => null);
+    const html = r?.ok ? await r.text() : "";
+    cacheHtml.set(rota, html);
+    return html;
+  };
+  const testaTexto = (html: string, valor: string): boolean => {
+    const h = norm(html), v = norm(valor);
+    if (h.includes(v)) return true;
+    // Tolerância a plural/género PT (classificação↔classificações, o sufixo -ão/-ões
+    // é irregular): palavra ÚNICA e longa → tenta também sem os 2 últimos caracteres.
+    if (!v.includes(" ") && v.length >= 7 && h.includes(v.slice(0, -2))) return true;
+    return false;
+  };
+  const testa = (html: string, c: Criterio): boolean =>
+    c.tipo === "texto"
+      ? testaTexto(html, c.valor)
+      : new RegExp(`<${c.valor}[\\s>]`, "i").test(html);
+
+  // Conjunto de rotas concretas para o fallback "existe algures na app".
+  const rotasConcretas = await resolverRotas(previewUrl, rotasApp.length ? rotasApp : ["/"]);
+
   for (const c of criterios) {
     const rota = c.rota.startsWith("/") ? c.rota : `/${c.rota}`;
-    let html = cacheHtml.get(rota);
-    if (html === undefined) {
-      const r = await fetch(`${previewUrl}${rota === "/" ? "" : rota}`, { signal: AbortSignal.timeout(20000) }).catch(() => null);
-      html = r?.ok ? await r.text() : "";
-      cacheHtml.set(rota, html);
+    // 1) rota atribuída pelo gerador
+    let passou = testa(await fetchHtml(rota), c);
+    // 2) fallback: a feature conta se existir em QUALQUER rota da app
+    if (!passou) {
+      for (const rc of rotasConcretas) {
+        if (rc === rota) continue;
+        if (testa(await fetchHtml(rc), c)) { passou = true; break; }
+      }
     }
-    const passa = c.tipo === "texto"
-      ? norm(html).includes(norm(c.valor))
-      : new RegExp(`<${c.valor}[\\s>]`, "i").test(html);
-    if (!passa) falhas.push(`${c.descricao} (${c.tipo}: "${c.valor}" em ${rota})`);
+    if (!passou) falhas.push(`${c.descricao} (${c.tipo}: "${c.valor}")`);
   }
   await runlog(orderId, "info", `aceitação: ${criterios.length - falhas.length}/${criterios.length} critérios OK${falhas.length ? " · em falta: " + falhas.slice(0, 3).join("; ") : ""}`);
   return { ok: falhas.length === 0, falhas };
