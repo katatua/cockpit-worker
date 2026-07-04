@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="pt">
+<!-- Fixture do verify C6: lista com via de criação + filtros com aria +
+     chips radio com aria + botão morto + seletor sem a11y + filtro com
+     efeito ilegível (muda só document.title — zero mutações no body). -->
+<head><meta charset="utf-8"><title>Fixture C6</title></head>
+<body>
+  <h1>Tarefas</h1>
+
+  <!-- via de criação da app (C6.2: a sementeira usa isto) -->
+  <form id="criar">
+    <input type="text" id="novo" placeholder="Nova tarefa">
+    <button type="submit">Adicionar</button>
+  </form>
+
+  <!-- filtros: role=tab + aria-selected (C6.1 seletor; C6.3 asserção própria+coleção) -->
+  <div role="tablist">
+    <button role="tab" aria-selected="true"  data-f="todas">Todas</button>
+    <button role="tab" aria-selected="false" data-f="ativas">Ativas</button>
+    <button role="tab" aria-selected="false" data-f="concluidas">Concluídas</button>
+  </div>
+
+  <!-- chips de prioridade: aria-pressed (C6.1 toggle) -->
+  <div>
+    <button aria-pressed="false" data-p="alta">Alta</button>
+    <button aria-pressed="false" data-p="media">Média</button>
+    <button aria-pressed="false" data-p="baixa">Baixa</button>
+  </div>
+
+  <!-- verify#2: botão genuinamente morto (sem handler) -->
+  <button id="morto">Exportar</button>
+
+  <!-- verify#3: seletor interativo SEM estado a11y (handler corre mas nada muda) -->
+  <button id="sem-a11y">Ordenar</button>
+
+  <!-- verify#5: filtro cujo efeito o smoke não sabe ler (só muda o title) -->
+  <button id="ilegivel">Modo compacto</button>
+
+  <ul id="lista"></ul>
+
+  <script>
+    const lista = document.getElementById("lista");
+    let filtro = "todas", prioridade = null, compacto = false, ordem = 1;
+    function render() {
+      for (const li of lista.querySelectorAll("li")) {
+        const done = li.dataset.done === "1";
+        li.style.display = (filtro === "ativas" && done) || (filtro === "concluidas" && !done) ? "none" : "";
+      }
+    }
+    document.getElementById("criar").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const v = document.getElementById("novo").value.trim();
+      if (!v) return;
+      const li = document.createElement("li");
+      li.dataset.done = "0";
+      const chk = document.createElement("input");
+      chk.type = "checkbox";
+      chk.addEventListener("change", () => { li.dataset.done = chk.checked ? "1" : "0"; render(); });
+      li.append(chk, document.createTextNode(" " + v));
+      lista.append(li);
+      document.getElementById("novo").value = "";
+    });
+    for (const t of document.querySelectorAll("[role=tab]")) {
+      t.addEventListener("click", () => {
+        for (const o of document.querySelectorAll("[role=tab]")) o.setAttribute("aria-selected", "false");
+        t.setAttribute("aria-selected", "true");
+        filtro = t.dataset.f; render();
+      });
+    }
+    for (const c of document.querySelectorAll("[aria-pressed]")) {
+      c.addEventListener("click", () => {
+        const on = c.getAttribute("aria-pressed") === "true";
+        for (const o of document.querySelectorAll("[aria-pressed]")) o.setAttribute("aria-pressed", "false");
+        c.setAttribute("aria-pressed", String(!on));
+        prioridade = on ? null : c.dataset.p;
+      });
+    }
+    // sem-a11y: handler corre mas não produz QUALQUER mutação nem estado
+    document.getElementById("sem-a11y").addEventListener("click", () => { ordem = -ordem; });
+    // ilegível: handler corre, muda o title (fora do body → 0 mutações no observer)
+    document.getElementById("ilegivel").addEventListener("click", () => {
+      compacto = !compacto; document.title = compacto ? "Fixture C6 · compacto" : "Fixture C6";
+    });
+    // #morto: propositadamente SEM listener
+  </script>
+</body>
+</html>

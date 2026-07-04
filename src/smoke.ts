@@ -25,6 +25,17 @@ export type SmokeReport = {
   consoleErros: string[];
   botoesTestados: number;
   botoesQuebrados: { seletor: string; motivo: string }[];
+  // C6.4: controlo com handler mas sem efeito observável NEM estado acessível
+  // (aria-pressed/aria-selected/data-state). Falha o gate com mensagem
+  // DISTINTA de "morto" — o fix é acrescentar o atributo, não mexer no handler.
+  naoTestaveis: { seletor: string; motivo: string }[];
+  // C6.5: o controlo funciona (handler ligado + mutações observadas) mas a
+  // asserção tipada não reconheceu o efeito → suspeita do ORÁCULO, não do
+  // código. NUNCA chumba a ordem (política warn) nem alimenta `tentativas`.
+  oracleSuspects: { seletor: string; motivo: string }[];
+  // C6.2: nº de itens semeados pela via de criação da app antes de asserir
+  // filtros/seletores (filtro contra coleção vazia é no-op — proibido).
+  sementes: number;
   navegacoes: number;
   formulariosTestados: number;
   formulariosQuebrados: { seletor: string; motivo: string }[];
@@ -82,6 +93,100 @@ async function fillInput(input: import("playwright-core").Locator): Promise<void
  */
 const MAX_ROTAS = 5;
 
+// ---------------------------------------------------------------------------
+// C6 · sondas no browser (strings — correm no contexto da página)
+// ---------------------------------------------------------------------------
+
+/** Hash do DOM (deteta QUALQUER mudança real; length era cego a trocas de classe). */
+const DOM_HASH = "(()=>{let h=0;const s=document.body.innerHTML;for(let i=0;i<s.length;i++){h=(h*31+s.charCodeAt(i))|0}return h})()";
+
+/** C6.5(2): contador global de mutações — instala 1 observer, reset por clique. */
+const MUT_INSTALL = "(()=>{if(!window.__smokeObs){window.__smokeMuts=0;window.__smokeObs=new MutationObserver(m=>{window.__smokeMuts+=m.length});window.__smokeObs.observe(document.documentElement,{subtree:true,childList:true,attributes:true,characterData:true});}window.__smokeMuts=0;return true})()";
+
+/**
+ * C6.1: estado próprio legível por máquina (toggle/seletor/tab/radio).
+ * NOTA: closures reais, não strings — locator.evaluate("el => …") falha
+ * silenciosamente nesta versão do playwright-core (foi a causa de "Todas"
+ * cair em suspect e "Ordenar" em morto no primeiro verify C6).
+ */
+// Tipo estrutural mínimo (o tsconfig do worker não carrega a lib DOM).
+type ElLike = {
+  getAttribute(n: string): string | null;
+  closest(s: string): unknown;
+  parentElement: ElLike | null;
+  onclick?: unknown;
+  __smokeClickHandler?: boolean;
+};
+
+const ownState = (el: ElLike) => JSON.stringify({
+  p: el.getAttribute("aria-pressed"), s: el.getAttribute("aria-selected"),
+  d: el.getAttribute("data-state"), r: el.getAttribute("role"),
+  c: el.getAttribute("aria-checked"),
+});
+
+/**
+ * C6.5(1): handler ligado? Três fontes, por ordem de precisão:
+ * onclick direto · props React (__reactProps$) · addEventListener("click")
+ * registado pelo init-script (apps vanilla — invisível às outras duas).
+ */
+const temHandler = (el: ElLike) => {
+  let n: ElLike | null = el;
+  while (n) {
+    if (n.onclick || n.__smokeClickHandler) return true;
+    for (const k in n) {
+      if (k.startsWith("__reactProps$")) {
+        const p = (n as unknown as Record<string, { onClick?: unknown; onPointerDown?: unknown; onMouseDown?: unknown } | undefined>)[k];
+        if (p && (p.onClick || p.onPointerDown || p.onMouseDown)) return true;
+      }
+    }
+    n = n.parentElement;
+  }
+  return false;
+};
+
+/** Init-script: marca elementos que recebem addEventListener("click"). */
+const TRACK_LISTENERS = `(() => {
+  const orig = EventTarget.prototype.addEventListener;
+  EventTarget.prototype.addEventListener = function (type, ...rest) {
+    if (type === "click" || type === "pointerdown" || type === "mousedown") {
+      try { this.__smokeClickHandler = true; } catch {}
+    }
+    return orig.call(this, type, ...rest);
+  };
+})()`;
+
+/**
+ * C6.2 · Sementeira determinística: numa vista com via de criação (form com
+ * input de texto), cria 2 itens representativos ANTES de asserir filtros e
+ * marca o 2º como concluído (cobre os estados que os filtros particionam).
+ * Melhor esforço — nunca lança; devolve nº de itens criados.
+ */
+async function semearColecao(page: Page): Promise<number> {
+  let criados = 0;
+  try {
+    const form = page.locator("form:visible").first();
+    if ((await form.count()) === 0) return 0;
+    const input = form.locator('input[type="text"]:visible, input:not([type]):visible').first();
+    if ((await input.count()) === 0) return 0;
+    const submit = form.locator('button[type="submit"], input[type="submit"], button').first();
+    if ((await submit.count()) === 0) return 0;
+    for (const txt of ["Tarefa semeada ativa", "Tarefa semeada concluída"]) {
+      await input.fill(txt);
+      // Enter cobre forms com onSubmit; o clique cobre botões type=button.
+      const podeClicar = !(await submit.isDisabled().catch(() => true));
+      if (podeClicar) await submit.click({ timeout: 2000 }).catch(() => {});
+      else await input.press("Enter").catch(() => {});
+      await page.waitForTimeout(400);
+      criados++;
+    }
+    // Alterna o estado do último item criado (checkbox/toggle dentro da coleção).
+    const chk = page.locator("li input[type=checkbox]:visible, [role=listitem] input[type=checkbox]:visible, li [role=checkbox]:visible").last();
+    if ((await chk.count()) > 0) await chk.click({ timeout: 2000 }).catch(() => {});
+    await page.waitForTimeout(300);
+  } catch { /* sementeira é melhor-esforço */ }
+  return criados;
+}
+
 export async function smokeTest(previewUrl: string, rotas: string[] = ["/"]): Promise<SmokeReport> {
   const t0 = Date.now();
   const report: SmokeReport = {
@@ -89,6 +194,9 @@ export async function smokeTest(previewUrl: string, rotas: string[] = ["/"]): Pr
     consoleErros: [],
     botoesTestados: 0,
     botoesQuebrados: [],
+    naoTestaveis: [],
+    oracleSuspects: [],
+    sementes: 0,
     navegacoes: 0,
     formulariosTestados: 0,
     formulariosQuebrados: [],
@@ -106,6 +214,7 @@ export async function smokeTest(previewUrl: string, rotas: string[] = ["/"]): Pr
       timeout: 60000,
     });
     const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+    await context.addInitScript(TRACK_LISTENERS); // C6.5(1): deteta handlers vanilla
     const page = await context.newPage();
 
     // Captura erros de consola do próprio site — MAS ignora ruído benigno
@@ -168,24 +277,26 @@ export async function smokeTest(previewUrl: string, rotas: string[] = ["/"]): Pr
         }
       }
 
-      // 3) Botões visíveis da rota → click com timeout curto.
-      // §4.6 "cards não-clicáveis é a pior falha": um botão que clica SEM
-      // ERRO mas não produz efeito nenhum (sem navegação, sem mudança de DOM)
-      // é um BOTÃO MORTO — visto na landing-page do dono (CTA que não fazia
-      // nada e o smoke deixou passar). Agora exige-se efeito observável.
+      // C6.2) Sementeira ANTES dos botões: filtros/seletores só são
+      // asseríveis contra uma coleção não-vazia (filtro em lista vazia é
+      // no-op — 3 iterações queimadas na ordem aca7d5da por isto).
+      report.sementes += await semearColecao(page);
+
+      // 3) Botões visíveis da rota → click com asserção POR TIPO DE EFEITO
+      // (C6.1/C6.3). Um botão só é "morto" quando: não navega, não muda o DOM
+      // (hash), não faz scroll, não vira o próprio estado E não tem handler.
       const buttons = await page.locator("button:visible").all();
       for (let i = 0; i < Math.min(buttons.length, MAX_BOTOES); i++) {
-        report.botoesTestados++;
         const btn = buttons[i];
+        // C6.1 `submit-disabled`: disabled é comportamento correto, não teste.
+        if (await btn.isDisabled().catch(() => false)) continue;
+        report.botoesTestados++;
         const label = `${rota}#${(await btn.textContent().catch(() => ""))?.slice(0, 30) ?? `btn${i}`}`;
         const urlBefore = page.url();
-        // HASH do DOM, não comprimento: um filtro que move a classe "ativo" de
-        // um botão para outro muda o conteúdo mas NÃO o tamanho — comparar
-        // length dava falso "botão morto" (3 iterações queimadas na ordem
-        // aca7d5da, 2026-07-05). O hash deteta qualquer mudança real.
-        const DOM_HASH = "(()=>{let h=0;const s=document.body.innerHTML;for(let i=0;i<s.length;i++){h=(h*31+s.charCodeAt(i))|0}return h})()";
         const domBefore = await page.evaluate(DOM_HASH).catch(() => 0) as number;
         const scrollBefore = await page.evaluate("window.scrollY").catch(() => 0) as number;
+        const stateBefore = await btn.evaluate(ownState).catch(() => "{}");
+        await page.evaluate(MUT_INSTALL).catch(() => {});
         try {
           await btn.click({ timeout: 3000, trial: false });
           await page.waitForTimeout(700);
@@ -193,18 +304,45 @@ export async function smokeTest(previewUrl: string, rotas: string[] = ["/"]): Pr
           const domAfter = await page.evaluate(DOM_HASH).catch(() => 0) as number;
           const scrollAfter = await page.evaluate("window.scrollY").catch(() => 0) as number;
           const fezScroll = Math.abs(scrollAfter - scrollBefore) >= 4; // scroll-to-secção é efeito VÁLIDO
+
           if (urlAfter !== urlBefore) {
             report.navegacoes++;
             await page.goto(urlRota, { waitUntil: "domcontentloaded", timeout: 10000 }).catch(() => {});
             await page.waitForTimeout(500);
-          } else if (domAfter === domBefore && !fezScroll) {
-            // clique "bem-sucedido" sem QUALQUER efeito: nem navegou, nem mudou o
-            // DOM, nem fez scroll → botão morto de verdade. (Um botão que rola até
-            // uma secção — nav âncora — é VÁLIDO e já não é marcado morto.)
-            const dentroDeForm = await btn.evaluate("el => !!el.closest('form')").catch(() => false);
-            if (!dentroDeForm) {
-              report.botoesQuebrados.push({ seletor: label, motivo: "botão morto: clique não navega, não altera a página nem faz scroll" });
-            }
+            continue;
+          }
+          if (domAfter !== domBefore || fezScroll) continue; // efeito observável → OK
+
+          // Sem efeito aparente. C6.3: um toggle/radio JÁ ATIVO clicado de novo
+          // é um no-op legítimo (radio semantics) — não é botão morto.
+          const st = JSON.parse(stateBefore || "{}") as Record<string, string | null>;
+          const jaAtivo = st.p === "true" || st.s === "true" || st.c === "true" || st.d === "active" || st.d === "on" || st.d === "checked";
+          if (jaAtivo) continue;
+          const temEstadoA11y = st.p !== null || st.s !== null || st.c !== null || st.d !== null || st.r === "tab" || st.r === "radio";
+
+          // C6.5: sonda de falsificabilidade — handler ligado? correu?
+          const handler = await btn.evaluate(temHandler).catch(() => false);
+          const mutacoes = await page.evaluate("window.__smokeMuts ?? 0").catch(() => 0) as number;
+          const dentroDeForm = await btn.evaluate((el) => !!el.closest("form")).catch(() => false);
+          if (dentroDeForm) continue; // submits são testados no passo 2
+
+          // Veredicto (C6.5): MUTAÇÕES são a evidência primária de que o
+          // handler correu — cobrem efeitos fora do body.innerHTML (title,
+          // <head>, atributos do <html>) que o hash não vê.
+          if (mutacoes > 0) {
+            // Algo correu de facto, mas a asserção não reconheceu o efeito →
+            // suspeito é o ORÁCULO, não o código. Nunca alimenta `tentativas`.
+            report.oracleSuspects.push({ seletor: label, motivo: `houve ${mutacoes} mutações ao clicar mas o efeito não foi reconhecido pela asserção` });
+          } else if (handler && !temEstadoA11y) {
+            // C6.4 lei da app: controlo interativo sem estado legível por máquina.
+            report.naoTestaveis.push({ seletor: label, motivo: "não-testável: tem handler mas nenhum efeito observável nem estado acessível — adiciona aria-pressed/aria-selected (ou data-state) ao controlo" });
+          } else if (handler && temEstadoA11y) {
+            // Tem estado a11y, não estava ativo, o handler correu… e o estado
+            // não virou → defeito real do controlo.
+            report.botoesQuebrados.push({ seletor: label, motivo: "botão de estado não vira o próprio aria/data-state ao clicar" });
+          } else {
+            // Sem handler, sem efeito: morto de verdade.
+            report.botoesQuebrados.push({ seletor: label, motivo: "botão morto: sem handler ligado e o clique não navega, não altera a página nem faz scroll" });
           }
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
@@ -218,10 +356,14 @@ export async function smokeTest(previewUrl: string, rotas: string[] = ["/"]): Pr
       }
     }
 
-    // 4) Fim — se houver erros de consola, botões ou forms quebrados → falha
+    // 4) Fim — erros de consola, botões mortos, forms quebrados ou controlos
+    // não-testáveis (C6.4 — critério satisfazível: adicionar aria) → falha.
+    // oracleSuspects NUNCA chumbam aqui (C6.5, política warn) — o chamador
+    // decide (default: aviso honesto, sem alimentar `tentativas`).
     if (report.consoleErros.length > 0) report.ok = false;
     if (report.botoesQuebrados.length > 0) report.ok = false;
     if (report.formulariosQuebrados.length > 0) report.ok = false;
+    if (report.naoTestaveis.length > 0) report.ok = false;
 
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

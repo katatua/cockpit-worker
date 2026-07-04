@@ -197,6 +197,9 @@ export async function processOrder(order: OrderRow): Promise<void> {
         "- COERÊNCIA / PROPAGAÇÃO (regra rígida): qualquer alteração tem implicações noutras partes da app. Quando mudas dados ou uma feature, ATUALIZA TODAS as que dependem disso, para a app ficar coerente — nunca deixes metade com dados novos e metade com os antigos. Pergunta-te 'o que é que consome este dado?' e segue o rasto até ao fim. Ex. (Mundial): mudar os RESULTADOS dos jogos obriga a atualizar as CLASSIFICAÇÕES, o QUADRO/simulador, o 'próximo jogo'/contagem decrescente E os VÍDEOS (procura highlights REAIS dos jogos que se jogaram — não deixes os vídeos antigos, que já não correspondem). O mesmo em qualquer app: mudar um produto/preço → atualizar carrinho, listagens, totais; mudar um autor → atualizar todos os artigos dele, etc. MAS faz isto de forma CIRÚRGICA: propaga só às features REALMENTE afetadas e com Edit pontual em cada uma — coerência não é desculpa para reescrever a app inteira.",
         "- Layout rico: hero de altura generosa, secções com ritmo, grid assimétrico quando fizer sentido, footer completo. Evita a página centrada de uma coluna só.",
         "- TODOS os botões e links têm de FAZER algo (navegar, abrir, submeter, scrollar até uma secção). Um botão morto é um bug.",
+        "- LEI DA APP — estado acessível (C6.4): filtros, chips, tabs e seletores expõem SEMPRE o próprio estado à máquina: aria-pressed nos toggles, aria-selected (+ role=tab) nos tabs, ou data-state. O gate de qualidade CHUMBA controlos interativos sem estado legível ('não-testável') — e é acessibilidade de borla.",
+        "- DADOS DE DEMONSTRAÇÃO (C6.2): apps com coleções (listas, tabelas, grelhas) NUNCA nascem vazias — semeia 2-3 itens realistas que cubram os estados que os filtros particionam (ex.: numa app de tarefas, 1 ativa + 1 concluída). Uma coleção vazia não é demonstrável nem testável.",
+        "- HIDRATAÇÃO (C6.6, regra rígida): ZERO leituras de browser no render ou no initializer do useState — proibido window, localStorage, Date.now() e new Date() nesses sítios. Todas as leituras de browser vão para useEffect/useSyncExternalStore. Erros de hidratação na consola chumbam o gate.",
         "ORDEM DE TRABALHO:\n1. Lê o 'MAPA DE DEPENDÊNCIAS' no AGENTS.md (se existir) para saber que features dependem de que dados.\n2. Se a página precisa de imagens, GERA-AS primeiro (podes gerar várias — cada uma é um comando).\n3. Implementa o código (app/*.tsx, componentes, estilos) com qualidade editorial, PROPAGANDO a alteração a todas as features dependentes.\n4. `npm run build` e corrige até compilar.\n5. REVISÃO DE COERÊNCIA (obrigatória antes de terminar): percorre a app inteira e confirma que TUDO reflete a alteração — nenhuma feature ficou com dados antigos/inconsistentes (dados↔classificações↔quadro↔vídeos↔próximo-jogo, ou o equivalente na tua app).\n6. Atualiza o 'MAPA DE DEPENDÊNCIAS' no AGENTS.md (secção curta: 'feature X usa dados Y') se descobriste uma nova ligação — é a memória de coerência da app.\n7. Só no fim, se sobrar tempo: 1-2 edições a SPEC.md/CHANGELOG.md.",
         "Nunca inventes segredos. Nunca reportes sucesso sem editares mesmo.",
         memoriaBlock,
@@ -421,18 +424,30 @@ export async function processOrder(order: OrderRow): Promise<void> {
         await runlog(order.id, "stderr", `smoke SALTADO (infra): ${smoke.skip}`);
         await event(order.app_id, order.id, order.user_id, "smoke.skip", { motivo: smoke.skip });
       } else if (smoke) {
-        await runlog(order.id, "info", `smoke: ${smoke.botoesTestados} botões, ${smoke.formulariosTestados} forms, ${smoke.consoleErros.length} erros consola, ${smoke.navegacoes} navegações (${smoke.duracaoMs}ms)`);
+        await runlog(order.id, "info", `smoke: ${smoke.botoesTestados} botões, ${smoke.formulariosTestados} forms, ${smoke.consoleErros.length} erros consola, ${smoke.navegacoes} navegações, ${smoke.sementes} sementes (${smoke.duracaoMs}ms)`);
         for (const err of smoke.consoleErros.slice(0, 5)) await runlog(order.id, "stderr", `console: ${err}`);
         for (const b of smoke.botoesQuebrados.slice(0, 5)) await runlog(order.id, "stderr", `botão quebrado: ${b.seletor} · ${b.motivo}`);
         for (const f of smoke.formulariosQuebrados.slice(0, 5)) await runlog(order.id, "stderr", `form quebrado: ${f.seletor} · ${f.motivo}`);
-        if (!smoke.ok) {
+        for (const n of smoke.naoTestaveis.slice(0, 5)) await runlog(order.id, "stderr", `não-testável: ${n.seletor} · ${n.motivo}`);
+        for (const s of smoke.oracleSuspects.slice(0, 5)) await runlog(order.id, "info", `oracle-suspect: ${s.seletor} · ${s.motivo}`);
+
+        // C6.5 · política oracleSuspect (default warn — regista em DECISIONS.md):
+        // warn  → a ordem segue com aviso honesto; NÃO alimenta `tentativas`.
+        // block → suspects contam como falha (gate duro por app, se o dono quiser).
+        const oraclePolicy = (process.env.ORACLE_SUSPECT_POLICY ?? "warn") as "warn" | "block";
+        const suspectsBloqueiam = oraclePolicy === "block" && smoke.oracleSuspects.length > 0;
+
+        if (!smoke.ok || suspectsBloqueiam) {
           const partes = [];
           if (smoke.botoesQuebrados.length > 0) partes.push(`${smoke.botoesQuebrados.length} botões`);
           if (smoke.formulariosQuebrados.length > 0) partes.push(`${smoke.formulariosQuebrados.length} forms`);
           if (smoke.consoleErros.length > 0) partes.push(`${smoke.consoleErros.length} erros consola`);
+          // C6.4: mensagem DISTINTA — o fix é acrescentar aria, não mexer no handler.
+          if (smoke.naoTestaveis.length > 0) partes.push(`${smoke.naoTestaveis.length} controlos não-testáveis (falta aria-pressed/aria-selected)`);
+          if (suspectsBloqueiam) partes.push(`${smoke.oracleSuspects.length} oracle-suspects (política block)`);
           lastError = `smoke falhou: ${partes.join(" + ")}`;
           // Nomeia os botões (ex.: "/#Alta" → "Alta") — transparência > caixa preta.
-          const nomes = smoke.botoesQuebrados.slice(0, 3)
+          const nomes = [...smoke.botoesQuebrados, ...smoke.naoTestaveis].slice(0, 3)
             .map((b) => b.seletor.replace(/^.*#/, "").replace(/\d+$/, "")).filter(Boolean);
           const resumo = partes.length > 0
             ? `${partes.join(" + ")} não funcionam bem${nomes.length ? ` (ex.: ${nomes.join(", ")})` : ""}. Vou corrigir antes de te entregar.`
@@ -442,6 +457,19 @@ export async function processOrder(order: OrderRow): Promise<void> {
           currentEstrategia = nx.estrategia;
           if (nx.esgotada) throw new Error(esgotadaHumana(lastError));
           continue;
+        }
+
+        // C6.5 · warn: o gate PASSOU mas há controlos cujo efeito o oráculo não
+        // soube ler. Aviso honesto no chat (nunca promoção silenciosa) + evento
+        // para telemetria/melhoria do harness. `tentativas` NÃO incrementa.
+        if (smoke.oracleSuspects.length > 0) {
+          const nomes = smoke.oracleSuspects.slice(0, 3)
+            .map((s) => s.seletor.replace(/^.*#/, "").replace(/\d+$/, "")).filter(Boolean);
+          await log(order.app_id, order.id, order.user_id, "agente", "texto",
+            `Nota honesta: ${smoke.oracleSuspects.length} controlo${smoke.oracleSuspects.length > 1 ? "s" : ""} (${nomes.join(", ")}) funciona${smoke.oracleSuspects.length > 1 ? "m" : ""}, mas o meu teste automático não reconheceu o efeito — deixei-o${smoke.oracleSuspects.length > 1 ? "s" : ""} marcado${smoke.oracleSuspects.length > 1 ? "s" : ""} para revisão.`);
+          await event(order.app_id, order.id, order.user_id, "smoke.oracle_suspect", {
+            controlos: smoke.oracleSuspects, iter, politica: oraclePolicy,
+          });
         }
       }
 
