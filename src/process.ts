@@ -348,7 +348,7 @@ export async function processOrder(order: OrderRow): Promise<void> {
       // goto (dev server lento a arrancar) e chumbava apps BOAS com falso
       // negativo (visto no site de férias: deploy + 8/8 aceitação OK mas
       // smoke local 127.0.0.1 timeout → retry → falha). Correção > micro-speed.
-      const deploy = await waitForPreviewDeploy(app.vercel_project_id, branch);
+      const deploy = await waitForPreviewDeploy(app.vercel_project_id, branch, sha);
       const deployMs = Date.now() - tDeploy0;
       const smokeLocal: import("./smoke.js").SmokeReport | null = null; // smoke corre a seguir contra o deploy
       await runlog(order.id, "deploy", `READY · ${deploy.url}`);
