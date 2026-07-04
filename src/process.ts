@@ -88,6 +88,10 @@ export async function processOrder(order: OrderRow): Promise<void> {
   const stopHeartbeat = startHeartbeat({ appId: order.app_id, orderId: order.id, userId: order.user_id });
 
   let lastError: string | null = null;
+  // C6.9: relatório POR-ELEMENTO da última falha de gate (JSON legível).
+  // O agente lê a asserção falhada concreta em vez de teorizar a partir da
+  // string-resumo — mata a "nona edição cega" vista na ordem aca7d5da.
+  let lastDetalhe: string | null = null;
   let currentEstrategia: Estrategia = "padrao";
   // C2.1 RESUME só DENTRO da mesma ordem (retries partilham o worktree, logo
   // o estado de sessão do SDK em .claude/ persiste). Cross-ordem/re-run NÃO —
@@ -199,6 +203,7 @@ export async function processOrder(order: OrderRow): Promise<void> {
         "- TODOS os botões e links têm de FAZER algo (navegar, abrir, submeter, scrollar até uma secção). Um botão morto é um bug.",
         "- LEI DA APP — estado acessível (C6.4): filtros, chips, tabs e seletores expõem SEMPRE o próprio estado à máquina: aria-pressed nos toggles, aria-selected (+ role=tab) nos tabs, ou data-state. O gate de qualidade CHUMBA controlos interativos sem estado legível ('não-testável') — e é acessibilidade de borla.",
         "- DADOS DE DEMONSTRAÇÃO (C6.2): apps com coleções (listas, tabelas, grelhas) NUNCA nascem vazias — semeia 2-3 itens realistas que cubram os estados que os filtros particionam (ex.: numa app de tarefas, 1 ativa + 1 concluída). Uma coleção vazia não é demonstrável nem testável.",
+        "- TESTIDS CANÓNICOS (C6.2): a via de criação de itens expõe data-testid estáveis — data-testid=\"new-item-input\" no input principal, data-testid=\"new-item-submit\" no botão de criar, data-testid=\"item-row\" em cada item da coleção. O gate usa-os para semear estado de forma determinística.",
         "- HIDRATAÇÃO (C6.6, regra rígida): ZERO leituras de browser no render ou no initializer do useState — proibido window, localStorage, Date.now() e new Date() nesses sítios. Todas as leituras de browser vão para useEffect/useSyncExternalStore. Erros de hidratação na consola chumbam o gate.",
         "ORDEM DE TRABALHO:\n1. Lê o 'MAPA DE DEPENDÊNCIAS' no AGENTS.md (se existir) para saber que features dependem de que dados.\n2. Se a página precisa de imagens, GERA-AS primeiro (podes gerar várias — cada uma é um comando).\n3. Implementa o código (app/*.tsx, componentes, estilos) com qualidade editorial, PROPAGANDO a alteração a todas as features dependentes.\n4. `npm run build` e corrige até compilar.\n5. REVISÃO DE COERÊNCIA (obrigatória antes de terminar): percorre a app inteira e confirma que TUDO reflete a alteração — nenhuma feature ficou com dados antigos/inconsistentes (dados↔classificações↔quadro↔vídeos↔próximo-jogo, ou o equivalente na tua app).\n6. Atualiza o 'MAPA DE DEPENDÊNCIAS' no AGENTS.md (secção curta: 'feature X usa dados Y') se descobriste uma nova ligação — é a memória de coerência da app.\n7. Só no fim, se sobrar tempo: 1-2 edições a SPEC.md/CHANGELOG.md.",
         "Nunca inventes segredos. Nunca reportes sucesso sem editares mesmo.",
@@ -234,7 +239,7 @@ export async function processOrder(order: OrderRow): Promise<void> {
         // (usa um bloco separado — see abaixo)
       } else {
       const guidance = iter === 1 ? "" : estrategiaGuidance(currentEstrategia);
-      const errCtx = lastError ? `\n\n[nota interna: a verificação anterior falhou com "${lastError.slice(0, 200)}". CONTINUA do estado atual do worktree (o teu trabalho anterior está lá) e corrige APENAS esse problema específico com uma edição pontual — NÃO recomeces do zero nem reescrevas o que já funcionava.]` : "";
+      const errCtx = lastError ? `\n\n[nota interna: a verificação anterior falhou com "${lastError.slice(0, 200)}".${lastDetalhe ? `\nRELATÓRIO POR-ELEMENTO da verificação (C6.9 — lê ISTO e corrige exatamente o que está aqui; NÃO teorizes a partir do resumo):\n${lastDetalhe}` : ""}\nCONTINUA do estado atual do worktree (o teu trabalho anterior está lá) e corrige APENAS esse problema específico com uma edição pontual — NÃO recomeces do zero nem reescrevas o que já funcionava.]` : "";
       // Se a interpretação gerou spec benchmark (pedido vago → spec detalhada
       // aprovada pelo user no card "Avanço?"), passa-a ao agente como a
       // especificação REAL a implementar — não só o pedido cru.
@@ -321,6 +326,7 @@ export async function processOrder(order: OrderRow): Promise<void> {
       const changed = await hasChanges(worktree);
       if (!changed) {
         lastError = "agente terminou sem alterar ficheiros";
+        lastDetalhe = null; // sem gate — detalhe antigo seria enganador (C6.9)
         await runlog(order.id, "stderr", "sem alterações — próxima estratégia");
         const nx = await nextEstrategia(order.id, lastError);
         currentEstrategia = nx.estrategia;
@@ -369,6 +375,7 @@ export async function processOrder(order: OrderRow): Promise<void> {
       if (!quality.ok) {
         for (const f of quality.falhas.slice(0, 10)) await runlog(order.id, "stderr", `broken: ${f.url} · ${f.motivo}`);
         lastError = `${quality.falhas.length} problemas: ${quality.falhas.slice(0, 3).map((f) => `${f.url} — ${f.motivo}`).join("; ")}`;
+        lastDetalhe = JSON.stringify({ falhasQuality: quality.falhas }, null, 1); // C6.9
         const resumo = quality.falhas.length === 1
           ? "Um link não está a funcionar. Vou tentar corrigir."
           : `${quality.falhas.length} coisas não funcionam. Vou tentar corrigir.`;
@@ -408,6 +415,7 @@ export async function processOrder(order: OrderRow): Promise<void> {
           const val = await validarAceitacao(deploy.url, criterios, order.id, rotasSmoke, CONFIG.ANTHROPIC_API_KEY);
           if (!val.ok) {
             lastError = `página incompleta: ${val.falhas.slice(0, 3).join("; ")}`;
+            lastDetalhe = JSON.stringify({ criteriosFalhados: val.falhas }, null, 1); // C6.9
             await log(order.app_id, order.id, order.user_id, "agente", "erro_humano",
               `Ainda falta parte do que combinámos (${val.falhas.length} item${val.falhas.length > 1 ? "s" : ""}). Vou completar.`);
             const nx = await nextEstrategia(order.id, lastError);
@@ -446,6 +454,16 @@ export async function processOrder(order: OrderRow): Promise<void> {
           if (smoke.naoTestaveis.length > 0) partes.push(`${smoke.naoTestaveis.length} controlos não-testáveis (falta aria-pressed/aria-selected)`);
           if (suspectsBloqueiam) partes.push(`${smoke.oracleSuspects.length} oracle-suspects (política block)`);
           lastError = `smoke falhou: ${partes.join(" + ")}`;
+          // C6.9: relatório por-elemento para o agente ler a asserção concreta.
+          lastDetalhe = JSON.stringify({
+            botoesQuebrados: smoke.botoesQuebrados,
+            naoTestaveis: smoke.naoTestaveis,
+            formulariosQuebrados: smoke.formulariosQuebrados,
+            consoleErros: smoke.consoleErros.slice(0, 5),
+            oracleSuspects: smoke.oracleSuspects,
+            sementes: smoke.sementes,
+            nota: "cada entrada tem o seletor (rota#texto) e o motivo da asserção falhada; 'não-testável' corrige-se com aria-pressed/aria-selected, NÃO mexendo no handler",
+          }, null, 1);
           // Nomeia os botões (ex.: "/#Alta" → "Alta") — transparência > caixa preta.
           const nomes = [...smoke.botoesQuebrados, ...smoke.naoTestaveis].slice(0, 3)
             .map((b) => b.seletor.replace(/^.*#/, "").replace(/\d+$/, "")).filter(Boolean);

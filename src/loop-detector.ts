@@ -17,11 +17,15 @@ import { supabase } from "./db.js";
 
 export type Estrategia = "padrao" | "simplificar" | "sem_feature_secundaria" | "reescrever_do_zero" | "esgotada";
 
+// C6.8: `reescrever_do_zero` FORA da progressão — reconstruir a app inteira
+// por causa de um gate funcional é destrutivo (deita fora trabalho bom) e
+// era o combustível do loop quando o oráculo estava errado. Esgotar as
+// estratégias cirúrgicas → escala ao humano com contexto, não à demolição.
+// (O valor mantém-se no tipo por causa de `estrategias` jsonb persistidos.)
 const ORDEM_ESTRATEGIAS: Estrategia[] = [
   "padrao",
   "simplificar",
   "sem_feature_secundaria",
-  "reescrever_do_zero",
 ];
 const MAX_TENTATIVAS_MESMO_ERRO = 3;
 

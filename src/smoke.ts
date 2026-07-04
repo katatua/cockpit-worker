@@ -164,11 +164,18 @@ const TRACK_LISTENERS = `(() => {
 async function semearColecao(page: Page): Promise<number> {
   let criados = 0;
   try {
+    // Seletores CANÓNICOS primeiro (o scaffold/prompt pede data-testid
+    // estáveis: new-item-input / new-item-submit); heurística como fallback.
+    const canonico = page.locator('[data-testid="new-item-input"]').first();
+    const usaCanonico = (await canonico.count()) > 0;
     const form = page.locator("form:visible").first();
-    if ((await form.count()) === 0) return 0;
-    const input = form.locator('input[type="text"]:visible, input:not([type]):visible').first();
+    if (!usaCanonico && (await form.count()) === 0) return 0;
+    const input = usaCanonico ? canonico
+      : form.locator('input[type="text"]:visible, input:not([type]):visible').first();
     if ((await input.count()) === 0) return 0;
-    const submit = form.locator('button[type="submit"], input[type="submit"], button').first();
+    const submit = usaCanonico
+      ? page.locator('[data-testid="new-item-submit"], button[type="submit"]').first()
+      : form.locator('button[type="submit"], input[type="submit"], button').first();
     if ((await submit.count()) === 0) return 0;
     for (const txt of ["Tarefa semeada ativa", "Tarefa semeada concluída"]) {
       await input.fill(txt);
@@ -228,6 +235,19 @@ export async function smokeTest(previewUrl: string, rotas: string[] = ["/"]): Pr
       report.consoleErros.push(txt.slice(0, 200));
     });
     page.on("pageerror", (err) => report.consoleErros.push(`pageerror: ${err.message.slice(0, 200)}`));
+    // C6.10: respostas HTTP >=400 e requests falhados também contam (um fetch
+    // interno a 500 é uma app partida mesmo com a consola limpa) — com o mesmo
+    // filtro de ruído benigno do favicon/manifest.
+    page.on("response", (res) => {
+      if (res.status() >= 400 && !CONSOLE_BENIGNO.test(res.url())) {
+        report.consoleErros.push(`http ${res.status()}: ${res.url().slice(0, 160)}`);
+      }
+    });
+    page.on("requestfailed", (req) => {
+      if (!CONSOLE_BENIGNO.test(req.url())) {
+        report.consoleErros.push(`requestfailed: ${req.url().slice(0, 160)}`);
+      }
+    });
 
     // §4.6: percorre as rotas descobertas (não só a home). Rotas dinâmicas
     // ([id]) ficam de fora — sem dados reais não há URL concreta.
@@ -282,10 +302,12 @@ export async function smokeTest(previewUrl: string, rotas: string[] = ["/"]): Pr
       // no-op — 3 iterações queimadas na ordem aca7d5da por isto).
       report.sementes += await semearColecao(page);
 
-      // 3) Botões visíveis da rota → click com asserção POR TIPO DE EFEITO
-      // (C6.1/C6.3). Um botão só é "morto" quando: não navega, não muda o DOM
-      // (hash), não faz scroll, não vira o próprio estado E não tem handler.
-      const buttons = await page.locator("button:visible").all();
+      // 3) Controlos interativos da rota → click com asserção POR TIPO DE
+      // EFEITO (C6.1/C6.3). Inventário alargado: não só <button> — também
+      // divs/spans com role de controlo (comum em UI React "de mão"). Um
+      // controlo só é "morto" quando: não navega, não muda o DOM (hash),
+      // não faz scroll, não vira o próprio estado E não tem handler.
+      const buttons = await page.locator('button:visible, [role="button"]:visible, [role="tab"]:visible, [role="radio"]:visible, [role="switch"]:visible').all();
       for (let i = 0; i < Math.min(buttons.length, MAX_BOTOES); i++) {
         const btn = buttons[i];
         // C6.1 `submit-disabled`: disabled é comportamento correto, não teste.
