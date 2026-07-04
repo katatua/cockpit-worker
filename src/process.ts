@@ -79,6 +79,22 @@ export async function processOrder(order: OrderRow): Promise<void> {
   let lastError: string | null = null;
   let currentEstrategia: Estrategia = "padrao";
   let sessionId = order.session_id;
+  // C2.1: UMA conversa contínua por app — ordens são turnos da mesma sessão.
+  // Sem sessão própria, retoma a última sessão conhecida da APP (o agente
+  // lembra-se do que fez sem re-ler tudo).
+  if (!sessionId) {
+    const { data: ultima } = await supabase
+      .from("studio_orders")
+      .select("session_id")
+      .eq("app_id", order.app_id)
+      .not("session_id", "is", null)
+      .neq("id", order.id)
+      .order("updated_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    sessionId = (ultima as { session_id: string | null } | null)?.session_id ?? null;
+    if (sessionId) await runlog(order.id, "info", `sdk:resume sessão da app ${sessionId.slice(0, 8)}…`);
+  }
   let totalTokens = 0;
   const allToolsUsadas: Array<{ name: string; input: unknown }> = [];
   let allFinalText = "";
@@ -197,9 +213,27 @@ export async function processOrder(order: OrderRow): Promise<void> {
       const spec = intencaoAprovada && intencaoAprovada.includes("O que vou incluir:")
         ? `\n\n--- ESPECIFICAÇÃO APROVADA PELO UTILIZADOR (implementa TUDO) ---\n${intencaoAprovada}`
         : "";
+      // C2.3: steering — mensagens que o utilizador mandou DURANTE a execução
+      // entram no turno seguinte (a fila honesta: "guardei; aplico já a seguir").
+      const { data: steering } = await supabase
+        .from("studio_events")
+        .select("id, payload")
+        .eq("app_id", order.app_id)
+        .eq("tipo", "steering.pendente")
+        .order("created_at", { ascending: true });
+      let steeringCtx = "";
+      if (steering && steering.length > 0) {
+        const textos = steering.map((s) => (s.payload as { texto?: string }).texto).filter(Boolean);
+        steeringCtx = `\n\n--- O UTILIZADOR ACRESCENTOU DURANTE A EXECUÇÃO (aplica já) ---\n${textos.map((t) => `- ${t}`).join("\n")}`;
+        // consome: passa a steering.aplicado (auditoria mantém-se)
+        for (const s of steering) {
+          await supabase.from("studio_events").update({ tipo: "steering.aplicado" }).eq("id", s.id);
+        }
+        await runlog(order.id, "info", `steering aplicado: ${textos.length} instrução(ões) do utilizador`);
+      }
       const userPrompt = guidance
-        ? `${guidance}\n\n${order.texto}${spec}${errCtx}`
-        : `${order.texto}${spec}${errCtx}`;
+        ? `${guidance}\n\n${order.texto}${spec}${steeringCtx}${errCtx}`
+        : `${order.texto}${spec}${steeringCtx}${errCtx}`;
       if (iter === 1) await log(order.app_id, order.id, order.user_id, "agente", "pensamento", "A perceber o pedido…");
       else await log(order.app_id, order.id, order.user_id, "agente", "pensamento", `A tentar outra abordagem (${currentEstrategia.replace(/_/g, " ")})…`);
       await runlog(order.id, "tool", `agent.query iter=${iter}`);

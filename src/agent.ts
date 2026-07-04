@@ -149,7 +149,17 @@ export async function runAgent(input: AgentInput): Promise<AgentRun> {
     // Cada tool_use do agente vira uma linha crua no runlog (admin) E uma
     // mensagem no chat do 0-coder (traduzida por humanize.ts).
     if (m.type === "assistant" && input.orderId) {
-      const content = (m as { message?: { content?: Array<{ type: string; name?: string; input?: Record<string, unknown> }> } }).message?.content ?? [];
+      const content = (m as { message?: { content?: Array<{ type: string; name?: string; input?: Record<string, unknown>; text?: string }> } }).message?.content ?? [];
+      // C2.2: STREAMING real — o texto do assistente entra no chat À MEDIDA
+      // que acontece (a sensação Claude Code), não só um resumo a posteriori.
+      for (const c of content) {
+        if (c.type === "text" && c.text && c.text.trim().length > 2 && input.appId && input.userId) {
+          supabase.from("studio_messages").insert({
+            app_id: input.appId, order_id: input.orderId, user_id: input.userId,
+            autor: "agente", tipo: "texto", conteudo: { text: c.text.trim() },
+          }).then((r) => { if (r.error) console.warn(`msg texto stream falhou: ${r.error.message}`); });
+        }
+      }
       for (const c of content) {
         if (c.type === "tool_use" && c.name) {
           const isMcp = c.name.startsWith("mcp__");
