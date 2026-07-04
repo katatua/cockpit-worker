@@ -20,6 +20,7 @@ import { CONFIG } from "./config.js";
 import { cleanWorktree, shallowClone, createBranch, hasChanges, commitAll, push, diffStat } from "./git.js";
 import { runAgent } from "./agent.js";
 import { gerarAceitacao, validarAceitacao } from "./aceitacao.js";
+import { ensurePreview } from "./preview-manager.js";
 import { waitForPreviewDeploy } from "./vercel.js";
 import { checkQuality } from "./quality.js";
 import { smokeTest } from "./smoke.js";
@@ -101,6 +102,7 @@ export async function processOrder(order: OrderRow): Promise<void> {
   let allFinalText = "";
 
   try {
+    let agentMs = 0; // C5.3: duração da fase de execução (agente) na última iteração
     for (let iter = 1; iter <= MAX_ITER; iter++) {
       await runlog(order.id, "info", `iteração ${iter}/${MAX_ITER} · estratégia=${currentEstrategia}`);
 
@@ -243,6 +245,7 @@ export async function processOrder(order: OrderRow): Promise<void> {
       // e deixamos o quality gate decidir. Só falha se não há alterações.
       let runRes: Awaited<ReturnType<typeof runAgent>>;
       let salvaged = false;
+      const tAgent0 = Date.now(); // C5.3 telemetria: fase execução
       try {
         runRes = await runAgent({
           cwd: worktree,
@@ -268,6 +271,7 @@ export async function processOrder(order: OrderRow): Promise<void> {
           throw agentErr;
         }
       }
+      agentMs = Date.now() - tAgent0; // C5.3
       if (runRes.mcpToolsFaltantes.length > 0) {
         await event(order.app_id, order.id, order.user_id, "mcp.capacidade_em_falta", { tools: runRes.mcpToolsFaltantes });
       }
@@ -306,16 +310,36 @@ export async function processOrder(order: OrderRow): Promise<void> {
       await supabase.from("studio_orders").update({ plano, commit_sha: sha, diff_resumo: stat }).eq("id", order.id);
       await event(order.app_id, order.id, order.user_id, "worker.commit", { sha, branch, stat, iter });
 
-      // --- (5) Vercel deploy ---
+      // --- (5) Vercel deploy + (6b-paralelo) smoke LOCAL na branch ---
+      // C5.2: o poll do deploy corre EM PARALELO com o smoke no dev server
+      // local (C1: já serve a branch da ordem nesta máquina) — nunca em série.
+      // Se o dev server não arrancar, o smoke repete-se contra o deploy (honesto).
       plano = step(plano, "p4", "em_execucao"); await supabase.from("studio_orders").update({ plano }).eq("id", order.id);
       await log(order.app_id, order.id, order.user_id, "agente", "atividade", "A esperar que a pré-visualização fique pronta…");
-      await runlog(order.id, "deploy", `poll vercel · branch=${branch}`);
-      const deploy = await waitForPreviewDeploy(app.vercel_project_id, branch);
+      await runlog(order.id, "deploy", `poll vercel · branch=${branch} (smoke local em paralelo)`);
+      const tDeploy0 = Date.now();
+      const rotasSmoke = await discoverRoutes(worktree).catch(() => ["/"]);
+      const smokeLocalP = (async () => {
+        try {
+          const { port } = await ensurePreview(app.slug, branch);
+          await runlog(order.id, "info", `smoke local · http://127.0.0.1:${port} · rotas: ${rotasSmoke.join(", ")}`);
+          return await smokeTest(`http://127.0.0.1:${port}`, rotasSmoke);
+        } catch (e) {
+          await runlog(order.id, "info", `smoke local indisponível (${e instanceof Error ? e.message.slice(0, 80) : e}) — corre contra o deploy`);
+          return null;
+        }
+      })();
+      const [deploy, smokeLocal] = await Promise.all([
+        waitForPreviewDeploy(app.vercel_project_id, branch),
+        smokeLocalP,
+      ]);
+      const deployMs = Date.now() - tDeploy0;
       await runlog(order.id, "deploy", `READY · ${deploy.url}`);
 
       // --- (6a) Quality gate HTTP link check ---
       await log(order.app_id, order.id, order.user_id, "agente", "atividade", "A verificar se tudo funciona…");
       await runlog(order.id, "info", `quality gate iter${iter} · ${deploy.url}`);
+      const tGate0 = Date.now();
       const quality = await checkQuality(deploy.url);
       await runlog(order.id, "info", `quality: ${quality.checked} URLs, ${quality.falhas.length} problemas`);
       if (!quality.ok) {
@@ -332,16 +356,16 @@ export async function processOrder(order: OrderRow): Promise<void> {
       }
 
       // --- (6b) Smoke Playwright — clique em botões, verifica consola ---
-      // §4.6: o smoke percorre as ROTAS DESCOBERTAS do worktree (não só a
-      // home) — um form em /upload só é testado assim.
-      const rotasSmoke = await discoverRoutes(worktree).catch(() => ["/"]);
-      await runlog(order.id, "info", `smoke playwright · ${deploy.url} · rotas: ${rotasSmoke.join(", ")}`);
-      const smoke = await smokeTest(deploy.url, rotasSmoke).catch((e) => {
-        // Se o Chromium não iniciar (imagem sem playwright, dev local), regista
-        // e continua — não bloqueia MVP se o browser em falta.
-        console.warn(`[${order.id.slice(0, 8)}] smoke skip:`, e.message);
-        return null;
-      });
+      // C5.2: se o smoke LOCAL (paralelo ao deploy) correu, usa esse resultado;
+      // senão corre agora contra o deploy (fallback honesto, em série).
+      let smoke = smokeLocal;
+      if (!smoke) {
+        await runlog(order.id, "info", `smoke playwright · ${deploy.url} · rotas: ${rotasSmoke.join(", ")}`);
+        smoke = await smokeTest(deploy.url, rotasSmoke).catch((e) => {
+          console.warn(`[${order.id.slice(0, 8)}] smoke skip:`, e.message);
+          return null;
+        });
+      }
       // --- (6c) C4.2: aceitação derivada da intenção — apanha "incompleta" ---
       {
         const { data: oAce } = await supabase.from("studio_orders").select("aceitacao, intencao").eq("id", order.id).maybeSingle();
@@ -429,6 +453,15 @@ export async function processOrder(order: OrderRow): Promise<void> {
       await log(order.app_id, order.id, order.user_id, "agente", "texto", `✓ Pré-visualização pronta.`);
       await event(order.app_id, order.id, order.user_id, "worker.preview_pronto", {
         url: deploy.url, ms: Date.now() - t0, qualityChecked: quality.checked, iter, totalTokens,
+      });
+      // C5.3: telemetria por fase — o que não se mede não se corrige.
+      await event(order.app_id, order.id, order.user_id, "telemetria.fases", {
+        execucao_s: Math.round(agentMs / 1000),
+        deploy_s: Math.round(deployMs / 1000),
+        gate_s: Math.round((Date.now() - tGate0) / 1000),
+        total_s: Math.round((Date.now() - t0) / 1000),
+        iteracoes: iter,
+        smoke_local: smokeLocal !== null,
       });
       console.log(`[${order.id.slice(0, 8)}] preview_pronto em ${Date.now() - t0}ms · iter=${iter} · ${deploy.url}`);
 
