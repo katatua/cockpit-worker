@@ -60,22 +60,56 @@ export async function runAgent(input: AgentInput): Promise<AgentRun> {
   const mcpToolsFaltantes: string[] = [];
   const toolsUsadas: Array<{ name: string; input: unknown }> = [];
 
-  // Timeout de segurança: total 15 min OU 4 min sem mensagem nova do SDK.
-  // Specs benchmark (9+ features) precisam de tempo real de implementação.
-  // O SALVAGE no process.ts garante que trabalho parcial não se perde.
-  const AGENT_TOTAL_MS = 15 * 60 * 1000;
+  // C3.3: instrumentação do hang — sabemos SEMPRE qual foi o último evento e
+  // que tool ficou pendente antes de qualquer silêncio.
+  let lastEvent = "init";
+  let pendingTool: string | null = null;
+
+  // C3 (delta arquitetural 2026-07-04): o "hang" tinha duas caras —
+  //  (a) tool fora da whitelist SEM canUseTool → pedido de permissão que
+  //      nunca resolve (corrigido: canUseTool fail-closed responde a TUDO);
+  //  (b) trabalho REAL >15min morto pelo TOTAL → tokens=0, result perdido.
+  // Novo desenho: IDLE 4min é o detetor de hang (sessão saudável emite
+  // sempre); TOTAL sobe para 45min como guarda de custo (custo é telemetria,
+  // não travão — §1); maxTurns limita loops de turnos.
+  const AGENT_TOTAL_MS = 45 * 60 * 1000;
   const AGENT_IDLE_MS = 240_000;
   const startAt = Date.now();
   let lastMsgAt = Date.now();
   let timedOut = false;
+  let timeoutMotivo = "";
   const abortController = new AbortController();
   const guard = setInterval(() => {
     const now = Date.now();
     if (now - startAt > AGENT_TOTAL_MS || now - lastMsgAt > AGENT_IDLE_MS) {
       timedOut = true;
+      timeoutMotivo = now - startAt > AGENT_TOTAL_MS ? "total_45min" : "idle_4min";
+      // C3.3: gravar o estado da sessão ANTES de matar — o watchdog deixa de
+      // ser rede cega e passa a instrumento de diagnóstico.
+      if (input.orderId) {
+        const diag = { motivo: timeoutMotivo, last_event: lastEvent, pending_tool: pendingTool, elapsed_s: Math.round((now - startAt) / 1000), session_id: sessionId };
+        runlog(input.orderId, "stderr", `WATCHDOG ${timeoutMotivo} · último evento: ${lastEvent} · tool pendente: ${pendingTool ?? "nenhuma"}`).catch(() => {});
+        if (input.appId && input.userId) {
+          supabase.from("studio_events").insert({
+            app_id: input.appId, order_id: input.orderId, user_id: input.userId,
+            tipo: "agente.hang", payload: diag,
+          }).then(() => {}, () => {});
+        }
+      }
       abortController.abort();
     }
   }, 5000);
+
+  // C3.1: canUseTool responde a TODAS as tools, SEMPRE — allow explícito para
+  // a whitelist (e BAI-MCP), deny IMEDIATO com log para o resto. Fail-closed
+  // = negar, nunca esperar. (A ausência disto deixava o SDK à espera de uma
+  // permissão interativa que nunca chegava em headless.)
+  const canUseTool = async (toolName: string, toolInput: Record<string, unknown>) => {
+    const permitida = allowedToolsBase.includes(toolName) || toolName.startsWith("mcp__bai__");
+    if (permitida) return { behavior: "allow" as const, updatedInput: toolInput };
+    if (input.orderId) runlog(input.orderId, "stderr", `tool NEGADA (fora da whitelist): ${toolName}`).catch(() => {});
+    return { behavior: "deny" as const, message: `A tool ${toolName} não está disponível neste ambiente — usa as tools permitidas (${allowedToolsBase.join(", ")}).` };
+  };
 
   // DEADLOCK FIX: o abortController.abort() mata o child process (SIGINT visto
   // no Fly) mas o generator do SDK pode NUNCA terminar — nem yield nem throw —
@@ -89,7 +123,11 @@ export async function runAgent(input: AgentInput): Promise<AgentRun> {
     options: {
       cwd: input.cwd,
       allowedTools: allowedToolsBase,
-      permissionMode: input.mode === "chat" ? "plan" : "acceptEdits",
+      // C3.1: 'plan' em headless podia pender à espera de aprovação do plano;
+      // chat passa a 'default' read-only (canUseTool nega escritas na mesma).
+      permissionMode: input.mode === "chat" ? "default" : "acceptEdits",
+      canUseTool, // C3.1: responde a TUDO, fail-closed
+      maxTurns: 200, // C3.2: limite de turnos (loops), nunca de tokens
       systemPrompt: input.systemPrompt,
       abortController,
       model: "claude-fable-5", // LLM do agente (SDK) — configurável
@@ -99,9 +137,12 @@ export async function runAgent(input: AgentInput): Promise<AgentRun> {
   })) {
     lastMsgAt = Date.now(); // qualquer mensagem reset o watchdog de silêncio
     const m = msg as SDKMessage & Record<string, unknown>;
+    // C3.3: rasto do último evento (tipo+subtipo) para diagnóstico de hang.
+    lastEvent = `${m.type}${(m as { subtype?: string }).subtype ? ":" + (m as { subtype?: string }).subtype : ""}`;
 
     if (m.type === "system" && (m as { subtype?: string }).subtype === "init") {
       sessionId = ((m as { session_id?: string }).session_id) ?? null;
+      if (input.orderId) runlog(input.orderId, "info", `sdk:init session=${sessionId ?? "?"}`).catch(() => {});
     }
 
     // Runlog + mensagens `atividade` humanizadas.
@@ -116,6 +157,7 @@ export async function runAgent(input: AgentInput): Promise<AgentRun> {
           const preview = JSON.stringify(c.input ?? {}).slice(0, 180);
           runlog(input.orderId, stream as "tool" | "info", `${c.name} ${preview}`).catch(() => {});
           toolsUsadas.push({ name: c.name, input: c.input ?? {} }); // F1 resumo
+          pendingTool = c.name; // C3.3: fica pendente até chegar tool_result
 
           // Fatia B: humanizar para o chat do 0-coder.
           // Fatia C: adiciona também sub-passo ao plano.p2 (hierárquico).
@@ -152,6 +194,7 @@ export async function runAgent(input: AgentInput): Promise<AgentRun> {
     if (m.type === "user" && input.orderId) {
       const content = (m as { message?: { content?: Array<{ type: string; is_error?: boolean; content?: unknown; tool_use_id?: string }> } }).message?.content ?? [];
       for (const c of content) {
+        if (c.type === "tool_result") pendingTool = null; // C3.3: resolvida
         if (c.type === "tool_result" && c.is_error) {
           const text = typeof c.content === "string" ? c.content : JSON.stringify(c.content).slice(0, 200);
           runlog(input.orderId, "stderr", `tool erro: ${text}`).catch(() => {});
@@ -163,6 +206,7 @@ export async function runAgent(input: AgentInput): Promise<AgentRun> {
     }
 
     if (m.type === "result") {
+      if (input.orderId) runlog(input.orderId, "info", `sdk:result ${(m as { subtype?: string }).subtype ?? ""} em ${Math.round((Date.now() - startAt) / 1000)}s`).catch(() => {});
       finalText = ((m as { result?: string }).result) ?? "";
       const u = ((m as { usage?: Record<string, number>; total_usage?: Record<string, number> }).usage
         ?? (m as { total_usage?: Record<string, number> }).total_usage
