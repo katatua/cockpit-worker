@@ -308,24 +308,17 @@ export async function processOrder(order: OrderRow): Promise<void> {
       // Se o dev server não arrancar, o smoke repete-se contra o deploy (honesto).
       plano = step(plano, "p4", "em_execucao"); await supabase.from("studio_orders").update({ plano }).eq("id", order.id);
       await log(order.app_id, order.id, order.user_id, "agente", "atividade", "A esperar que a pré-visualização fique pronta…");
-      await runlog(order.id, "deploy", `poll vercel · branch=${branch} (smoke local em paralelo)`);
+      await runlog(order.id, "deploy", `poll vercel · branch=${branch}`);
       const tDeploy0 = Date.now();
       const rotasSmoke = await discoverRoutes(worktree).catch(() => ["/"]);
-      const smokeLocalP = (async () => {
-        try {
-          const { port } = await ensurePreview(app.slug, branch);
-          await runlog(order.id, "info", `smoke local · http://127.0.0.1:${port} · rotas: ${rotasSmoke.join(", ")}`);
-          return await smokeTest(`http://127.0.0.1:${port}`, rotasSmoke);
-        } catch (e) {
-          await runlog(order.id, "info", `smoke local indisponível (${e instanceof Error ? e.message.slice(0, 80) : e}) — corre contra o deploy`);
-          return null;
-        }
-      })();
-      const [deploy, smokeLocal] = await Promise.all([
-        waitForPreviewDeploy(app.vercel_project_id, branch),
-        smokeLocalP,
-      ]);
+      // C5 revisto (2026-07-04): o smoke corre contra o DEPLOY (fiável, já
+      // READY), não contra o dev server local — este último dava timeout de
+      // goto (dev server lento a arrancar) e chumbava apps BOAS com falso
+      // negativo (visto no site de férias: deploy + 8/8 aceitação OK mas
+      // smoke local 127.0.0.1 timeout → retry → falha). Correção > micro-speed.
+      const deploy = await waitForPreviewDeploy(app.vercel_project_id, branch);
       const deployMs = Date.now() - tDeploy0;
+      const smokeLocal: import("./smoke.js").SmokeReport | null = null; // smoke corre a seguir contra o deploy
       await runlog(order.id, "deploy", `READY · ${deploy.url}`);
 
       // --- (6a) Quality gate HTTP link check ---
@@ -348,16 +341,13 @@ export async function processOrder(order: OrderRow): Promise<void> {
       }
 
       // --- (6b) Smoke Playwright — clique em botões, verifica consola ---
-      // C5.2: se o smoke LOCAL (paralelo ao deploy) correu, usa esse resultado;
-      // senão corre agora contra o deploy (fallback honesto, em série).
-      let smoke = smokeLocal;
-      if (!smoke) {
-        await runlog(order.id, "info", `smoke playwright · ${deploy.url} · rotas: ${rotasSmoke.join(", ")}`);
-        smoke = await smokeTest(deploy.url, rotasSmoke).catch((e) => {
-          console.warn(`[${order.id.slice(0, 8)}] smoke skip:`, e.message);
-          return null;
-        });
-      }
+      // Smoke contra o DEPLOY (fiável). C5-revisto: sem dev-server local no gate.
+      await runlog(order.id, "info", `smoke playwright · ${deploy.url} · rotas: ${rotasSmoke.join(", ")}`);
+      const smoke: import("./smoke.js").SmokeReport | null = await smokeTest(deploy.url, rotasSmoke).catch((e) => {
+        console.warn(`[${order.id.slice(0, 8)}] smoke skip:`, e.message);
+        return null;
+      });
+      void smokeLocal;
       // --- (6c) C4.2: aceitação derivada da intenção — apanha "incompleta" ---
       {
         const { data: oAce } = await supabase.from("studio_orders").select("aceitacao, intencao").eq("id", order.id).maybeSingle();
