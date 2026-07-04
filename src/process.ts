@@ -431,8 +431,11 @@ export async function processOrder(order: OrderRow): Promise<void> {
           if (smoke.formulariosQuebrados.length > 0) partes.push(`${smoke.formulariosQuebrados.length} forms`);
           if (smoke.consoleErros.length > 0) partes.push(`${smoke.consoleErros.length} erros consola`);
           lastError = `smoke falhou: ${partes.join(" + ")}`;
+          // Nomeia os botões (ex.: "/#Alta" → "Alta") — transparência > caixa preta.
+          const nomes = smoke.botoesQuebrados.slice(0, 3)
+            .map((b) => b.seletor.replace(/^.*#/, "").replace(/\d+$/, "")).filter(Boolean);
           const resumo = partes.length > 0
-            ? `${partes.join(" + ")} não funcionam bem. Vou tentar corrigir.`
+            ? `${partes.join(" + ")} não funcionam bem${nomes.length ? ` (ex.: ${nomes.join(", ")})` : ""}. Vou corrigir antes de te entregar.`
             : `A app está a dar erros. Vou tentar corrigir.`;
           await log(order.app_id, order.id, order.user_id, "agente", "erro_humano", resumo);
           const nx = await nextEstrategia(order.id, lastError);
