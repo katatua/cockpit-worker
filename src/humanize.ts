@@ -59,6 +59,12 @@ export function humanizeToolUse(name: string, input: ToolInput): string | null {
       return `A procurar ficheiros`;
     case "Grep":
       return `A procurar por padrões`;
+    case "WebSearch": {
+      const q = typeof input.query === "string" ? input.query.slice(0, 60) : "";
+      return q ? `A pesquisar na web: ${q}` : `A pesquisar na web`;
+    }
+    case "WebFetch":
+      return `A consultar uma página na web`;
     case "Bash": {
       const cmdFull = String(input.command ?? "");
       const cmd = cmdFull.slice(0, 60);

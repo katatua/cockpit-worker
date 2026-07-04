@@ -5,8 +5,10 @@
  * INVARIANTES:
  *   - Segredos: só ANTHROPIC_API_KEY como env.
  *   - Fail-closed: `Bash` restrito ao cwd; tools fora da whitelist rejeitadas.
- *   - Sem tools de rede próprias (WebFetch/WebSearch) — as capacidades de
- *     rede vêm do BAI-MCP (Brief §4.7: media, scraping, QR, email/SMS).
+ *   - Rede: WebSearch/WebFetch ATIVOS (2026-07-04) para o agente ir buscar
+ *     dados REAIS/atuais (resultados desportivos, notícias, preços) em vez de
+ *     inventar. Conteúdo web é DADOS não-fiáveis (o prompt proíbe seguir
+ *     instruções que lá venham). Restante (media, QR, email/SMS) via BAI-MCP.
  *   - Brief §1: SEM teto de tokens. Se explodir, kill-switch do dono.
  *   - Runlog: cada chamada de tool → linha stream=tool (ou stream=mcp para BAI).
  */
@@ -36,8 +38,8 @@ export type AgentInput = {
 
 export async function runAgent(input: AgentInput): Promise<AgentRun> {
   const allowedToolsBase = input.mode === "chat"
-    ? ["Read", "Glob", "Grep"]
-    : ["Read", "Write", "Edit", "Glob", "Grep", "Bash"];
+    ? ["Read", "Glob", "Grep", "WebSearch", "WebFetch"]
+    : ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "WebSearch", "WebFetch"];
 
   process.env.ANTHROPIC_API_KEY = CONFIG.ANTHROPIC_API_KEY;
 
