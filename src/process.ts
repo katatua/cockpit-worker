@@ -469,6 +469,7 @@ export async function processOrder(order: OrderRow): Promise<void> {
 
       await supabase.from("studio_orders").update({
         plano, preview_url: deploy.url, preview_deploy_id: deploy.deployId, estado: "preview_pronto",
+        erro: null, // sucesso limpa erro obsoleto de tentativas/cancelamentos anteriores
       }).eq("id", order.id);
       await log(order.app_id, order.id, order.user_id, "agente", "texto", `✓ Pré-visualização pronta.`);
       await event(order.app_id, order.id, order.user_id, "worker.preview_pronto", {
