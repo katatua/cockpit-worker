@@ -103,11 +103,34 @@ console.log(`Cockpit Studio Worker · ${CONFIG.WORKER_ID}`);
 console.log(`Supabase: ${CONFIG.SUPABASE_URL}`);
 console.log(`Poll a cada ${CONFIG.POLL_INTERVAL_S}s · orçamento max ${CONFIG.MAX_TOKENS_PER_ORDER} tokens/ordem`);
 
+// DISCO (2026-07-04): limpeza no arranque + periódica. A causa do
+// "unable to write new index file" era acumulação: worktrees de ordens em
+// /tmp/studio nunca eram apagados, e os clones dos dev servers em /data/apps
+// enchiam o volume. No boot nada está in-flight → apaga /tmp/studio inteiro.
+async function limparDiscoArranque() {
+  const { rm, readdir, stat } = await import("node:fs/promises");
+  try { await rm(CONFIG.WORKTREE_ROOT, { recursive: true, force: true }); console.log("disco: /tmp/studio limpo"); } catch { /* ok */ }
+  // /data/apps: mantém só os 4 dev servers mais recentes; o resto re-clona on-demand.
+  try {
+    const root = "/data/apps";
+    const dirs = await readdir(root).catch(() => []);
+    const comMtime = await Promise.all(dirs.map(async (d) => ({ d, m: (await stat(`${root}/${d}`).catch(() => ({ mtimeMs: 0 }))).mtimeMs })));
+    comMtime.sort((a, b) => b.m - a.m);
+    for (const { d } of comMtime.slice(4)) {
+      await rm(`${root}/${d}`, { recursive: true, force: true }).catch(() => {});
+      console.log(`disco: /data/apps/${d} removido (LRU)`);
+    }
+  } catch { /* ok */ }
+}
+await limparDiscoArranque();
+
 // Fatia 3b/3c: arranca o router HTTP em paralelo ao poll loop, no mesmo processo Node.
 // A porta 8080 fica exposta pelo Fly [http_service]. Idle sweeper mata dev servers
 // sem tráfego há mais de 20 min.
 startRouter(8080);
 setInterval(sweepIdle, 60_000);
+// disco: LRU dos dev servers a cada 10 min (mantém o volume folgado).
+setInterval(() => { limparDiscoArranque().catch(() => {}); }, 10 * 60_000);
 
 // CONCORRÊNCIA: uma ordem grande não pode monopolizar o worker inteiro.
 // Processamos até MAX_CONCURRENT ordens em paralelo, de APPS DIFERENTES

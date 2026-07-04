@@ -33,8 +33,20 @@ export type AppRow = {
 
 export type Plano = { passos: { id: string; titulo: string; estado: "por_fazer" | "em_execucao" | "feito" | "falhou" }[] };
 
+// SEGURANÇA (2026-07-04): redação de último recurso — NENHUM segredo sai para
+// a BD (chat do 0-coder OU caixa negra). Independente do git.ts (defesa em
+// profundidade: se um token vier de outra fonte, é apagado na mesma).
+function redact(s: string): string {
+  let out = s;
+  if (CONFIG.GITHUB_TOKEN) out = out.split(CONFIG.GITHUB_TOKEN).join("‹token›");
+  out = out.replace(/gh[pousr]_[A-Za-z0-9]{20,}/g, "‹token›");
+  out = out.replace(/x-access-token:[^@\s]+@/g, "x-access-token:‹token›@");
+  out = out.replace(/https:\/\/[^:@\s/]+:[^@\s/]+@/g, "https://‹redacted›@");
+  return out;
+}
+
 export async function log(appId: string, orderId: string, userId: string, autor: "sistema" | "agente", tipo: "texto" | "erro" | "estado" | "atividade" | "pensamento" | "confirmacao" | "erro_humano", text: string) {
-  await supabase.from("studio_messages").insert({ app_id: appId, order_id: orderId, user_id: userId, autor, tipo, conteudo: { text } });
+  await supabase.from("studio_messages").insert({ app_id: appId, order_id: orderId, user_id: userId, autor, tipo, conteudo: { text: redact(text) } });
 }
 
 /**
@@ -64,7 +76,8 @@ export async function runlog(orderId: string, stream: RunLogStream, linha: strin
   }
   const seq = base + 1;
   _seqByOrder.set(orderId, seq);
-  await supabase.from("studio_runlog").insert({ order_id: orderId, seq, stream, linha }).then((r) => {
+  // redação também na caixa negra — o token não deve existir em lado nenhum.
+  await supabase.from("studio_runlog").insert({ order_id: orderId, seq, stream, linha: redact(linha) }).then((r) => {
     if (r.error) console.warn(`[${orderId.slice(0, 8)}] runlog falhou: ${r.error.message}`);
   });
 }

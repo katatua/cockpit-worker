@@ -12,7 +12,7 @@
  *   - Estratégias esgotadas → falhou com erro_humano com alternativa
  *   - MAX_ITER (safety net absoluto contra runaway)
  */
-import { readFile, access } from "node:fs/promises";
+import { readFile, access, rm } from "node:fs/promises";
 import path from "node:path";
 import { spawnPromise } from "./spawn-helpers.js";
 import { supabase, tryLock, unlock, log, event, runlog, resetRunlogSeq, type OrderRow, type AppRow, type Plano } from "./db.js";
@@ -537,6 +537,10 @@ export async function processOrder(order: OrderRow): Promise<void> {
     stopHeartbeat();
     await unlock(order.app_id);
     await event(order.app_id, order.id, order.user_id, "worker.lock_libertado", {});
+    // DISCO (2026-07-04): o worktree da ordem NUNCA era apagado no fim — os
+    // clones (+ node_modules) acumulavam em /tmp/studio e enchiam a máquina
+    // ("unable to write new index file"). Limpa-se sempre, mesmo em falha.
+    try { await rm(path.join(CONFIG.WORKTREE_ROOT, order.id), { recursive: true, force: true }); } catch { /* best-effort */ }
   }
 }
 
@@ -546,13 +550,16 @@ async function fail(order: OrderRow, motivo: string) {
   const humano = motivo.startsWith("Tentei várias abordagens") ? motivo
     : /aborted by user|demorou muito|timeout/i.test(motivo) ? "A demorar demasiado — parei para não gastar mais. Tenta reformular o pedido ou dividi-lo em pedaços mais pequenos."
     : /nada para publicar|sem alterar ficheiros/i.test(motivo) ? "Não consegui perceber que alterações fazer. Reformula o pedido de forma mais concreta."
-    : /quality gate|smoke falhou/i.test(motivo) ? "As alterações que fiz não passaram na verificação de qualidade. Tenta reformular."
-    : null;
-  // Grava HUMANO em orders.erro (é o que a UI mostra); o cru só no runlog + event.
-  const paraUI = humano ?? motivo;
+    : /quality gate|smoke falhou|incompleta/i.test(motivo) ? "As alterações que fiz não passaram na verificação de qualidade — vou precisar que reformules o pedido."
+    : /unable to write|ENOSPC|no space|index file|clone/i.test(motivo) ? "Tive um problema técnico a preparar o espaço de trabalho. Já foi assinalado; tenta de novo daqui a um bocado."
+    // FAIL-SAFE (2026-07-04): erro técnico NÃO reconhecido → mensagem genérica
+    // humana. NUNCA se mostra stack trace / comando cru ao 0-coder (§4.3). O
+    // detalhe técnico vive só no runlog + event, para o dono.
+    : "Algo correu mal do meu lado. O detalhe ficou registado para o dono; tenta de novo.";
+  const paraUI = humano; // sempre humano — nunca o cru
   await supabase.from("studio_orders").update({ estado: "falhou", erro: paraUI }).eq("id", order.id);
-  await log(order.app_id, order.id, order.user_id, "sistema", humano ? "erro_humano" : "erro", paraUI);
-  await runlog(order.id, "stderr", `falhou (cru): ${motivo}`);
+  await log(order.app_id, order.id, order.user_id, "sistema", "erro_humano", paraUI);
+  await runlog(order.id, "stderr", `falhou (cru): ${motivo}`); // runlog já redige segredos
   await event(order.app_id, order.id, order.user_id, "worker.falhou", { motivo, mostrado: paraUI });
 }
 

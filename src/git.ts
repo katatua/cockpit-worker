@@ -7,14 +7,34 @@ import { rm, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { CONFIG } from "./config.js";
 
+/**
+ * SEGURANÇA (2026-07-04): o token NUNCA pode aparecer em erros/logs. Um clone
+ * falhado ecoava `git clone https://x-access-token:TOKEN@github.com/...` no
+ * stderr, que subia até ao chat do 0-coder. Esta função apaga qualquer
+ * segredo conhecido (o GITHUB_TOKEN, o padrão ghp_/gho_, e o user:token@ do
+ * URL) de qualquer string antes de a deixar sair daqui.
+ */
+export function redactSecrets(s: string): string {
+  let out = s;
+  if (CONFIG.GITHUB_TOKEN) out = out.split(CONFIG.GITHUB_TOKEN).join("‹token›");
+  out = out.replace(/gh[pousr]_[A-Za-z0-9]{20,}/g, "‹token›");
+  out = out.replace(/x-access-token:[^@\s]+@/g, "x-access-token:‹token›@");
+  out = out.replace(/https:\/\/[^:@\s/]+:[^@\s/]+@/g, "https://‹redacted›@");
+  return out;
+}
+
 function run(cmd: string, args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { cwd: opts.cwd, env: { ...process.env, ...(opts.env ?? {}) } });
     let out = ""; let err = "";
     child.stdout.on("data", (b) => (out += b.toString()));
     child.stderr.on("data", (b) => (err += b.toString()));
-    child.on("close", (code) => code === 0 ? resolve(out) : reject(new Error(`${cmd} ${args.join(" ")}: exit ${code}\n${err}`)));
-    child.on("error", reject);
+    child.on("close", (code) => code === 0
+      ? resolve(out)
+      // redação em camadas: o cmd+args (que inclui o URL autenticado) e o
+      // stderr passam ambos pelo filtro antes de virarem Error.
+      : reject(new Error(redactSecrets(`${cmd} ${args.join(" ")}: exit ${code}\n${err}`))));
+    child.on("error", (e) => reject(new Error(redactSecrets(e.message))));
   });
 }
 
