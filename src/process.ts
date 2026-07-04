@@ -90,11 +90,13 @@ export async function processOrder(order: OrderRow): Promise<void> {
   let lastError: string | null = null;
   let currentEstrategia: Estrategia = "padrao";
   // C2.1 RESUME só DENTRO da mesma ordem (retries partilham o worktree, logo
-  // o estado de sessão do SDK em .claude/ persiste). Cross-ordem NÃO — cada
-  // ordem clona um worktree fresco e o resume de uma sessão de outro worktree
-  // faz o subprocesso do SDK morrer (exit 1). A continuidade real entre
-  // ordens precisa do SessionStore Postgres (GAPS: sessionstore-postgres).
-  let sessionId = order.session_id;
+  // o estado de sessão do SDK em .claude/ persiste). Cross-ordem/re-run NÃO —
+  // um worktree fresco não tem a sessão, e resumir uma sessão inexistente MATA
+  // o subprocesso do SDK (exit 1 logo após sdk:init — visto na ordem d22c6f5a
+  // re-lançada). GUARD: começa SEMPRE a null; a sessão é criada no iter 1 e só
+  // resumida no iter 2+ (mesmo worktree). Ignora order.session_id (pode ser
+  // stale de um run anterior). Continuidade real entre ordens = SessionStore Postgres.
+  let sessionId: string | null = null;
   let totalTokens = 0;
   const allToolsUsadas: Array<{ name: string; input: unknown }> = [];
   let allFinalText = "";

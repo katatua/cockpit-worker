@@ -164,8 +164,10 @@ async function recuperarOrdem(o: OrdemOrfa, motivo: string): Promise<void> {
     return;
   }
   // Auto-requeue: volta a em_fila para o worker retomar SOZINHO (sem clique).
+  // session_id: null é CRÍTICO — o worktree vai ser clonado fresco; resumir uma
+  // sessão antiga do SDK num worktree onde ela não existe MATA o subprocesso (exit 1).
   const { data: ok } = await supabase.from("studio_orders")
-    .update({ estado: "em_fila", recuperacoes: rec + 1, heartbeat_at: null })
+    .update({ estado: "em_fila", recuperacoes: rec + 1, heartbeat_at: null, session_id: null })
     .eq("id", o.id).eq("estado", "em_execucao").select("id");
   if (ok && ok.length) {
     await supabase.from("studio_locks").delete().eq("app_id", o.app_id).then(() => {}, () => {});
