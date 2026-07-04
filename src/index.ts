@@ -107,10 +107,11 @@ console.log(`Poll a cada ${CONFIG.POLL_INTERVAL_S}s · orçamento max ${CONFIG.M
 // "unable to write new index file" era acumulação: worktrees de ordens em
 // /tmp/studio nunca eram apagados, e os clones dos dev servers em /data/apps
 // enchiam o volume. No boot nada está in-flight → apaga /tmp/studio inteiro.
-async function limparDiscoArranque() {
+// /data/apps: mantém só os 4 dev servers mais recentes (LRU). SEGURO em
+// qualquer momento — os dev servers re-clonam on-demand e não são worktrees
+// de ordens ativas.
+async function lruDevServers() {
   const { rm, readdir, stat } = await import("node:fs/promises");
-  try { await rm(CONFIG.WORKTREE_ROOT, { recursive: true, force: true }); console.log("disco: /tmp/studio limpo"); } catch { /* ok */ }
-  // /data/apps: mantém só os 4 dev servers mais recentes; o resto re-clona on-demand.
   try {
     const root = "/data/apps";
     const dirs = await readdir(root).catch(() => []);
@@ -121,6 +122,12 @@ async function limparDiscoArranque() {
       console.log(`disco: /data/apps/${d} removido (LRU)`);
     }
   } catch { /* ok */ }
+}
+// ARRANQUE: aqui NADA está a correr → é seguro limpar /tmp/studio inteiro.
+async function limparDiscoArranque() {
+  const { rm } = await import("node:fs/promises");
+  try { await rm(CONFIG.WORKTREE_ROOT, { recursive: true, force: true }); console.log("disco: /tmp/studio limpo (arranque)"); } catch { /* ok */ }
+  await lruDevServers();
 }
 await limparDiscoArranque();
 
@@ -140,8 +147,10 @@ await limparLocksOrfaos();
 // sem tráfego há mais de 20 min.
 startRouter(8080);
 setInterval(sweepIdle, 60_000);
-// disco: LRU dos dev servers a cada 10 min (mantém o volume folgado).
-setInterval(() => { limparDiscoArranque().catch(() => {}); }, 10 * 60_000);
+// disco: PERIÓDICO só o LRU dos dev servers — NUNCA /tmp/studio (lá vivem os
+// worktrees das ordens ATIVAS; apagá-los a meio matava o commit final com
+// `spawn git ENOENT`). Os worktrees são limpos pelo finally de cada ordem.
+setInterval(() => { lruDevServers().catch(() => {}); }, 10 * 60_000);
 
 // CONCORRÊNCIA: uma ordem grande não pode monopolizar o worker inteiro.
 // Processamos até MAX_CONCURRENT ordens em paralelo, de APPS DIFERENTES
