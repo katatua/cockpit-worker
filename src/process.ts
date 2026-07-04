@@ -148,11 +148,15 @@ export async function processOrder(order: OrderRow): Promise<void> {
             const hasLock = await access(path.join(worktree, "package-lock.json"))
               .then(() => true).catch(() => false);
             try {
-              await spawnPromise(hasLock ? "npm" : "npm",
-                hasLock ? ["ci", "--no-audit", "--no-fund", "--prefer-offline"]
-                        : ["install", "--no-audit", "--no-fund"],
+              // --include=dev É OBRIGATÓRIO: o worker corre com NODE_ENV=production
+              // (Dockerfile), o que faria o npm SALTAR as devDependencies — e o
+              // Tailwind + TypeScript + @types vivem lá. Sem isto, `next build`
+              // falhava (Tailwind/tsc em falta) e o agente lutava com o build.
+              await spawnPromise("npm",
+                hasLock ? ["ci", "--no-audit", "--no-fund", "--prefer-offline", "--include=dev"]
+                        : ["install", "--no-audit", "--no-fund", "--include=dev"],
                 { cwd: worktree });
-              await runlog(order.id, "info", `npm install OK`);
+              await runlog(order.id, "info", `npm install OK (com devDependencies)`);
             } catch (e) {
               await runlog(order.id, "stderr", `npm install falhou: ${e instanceof Error ? e.message.slice(0, 200) : String(e)}`);
               // Não bloqueia — o agente pode fazer as alterações e o Vercel constrói depois.
