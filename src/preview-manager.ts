@@ -19,7 +19,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, access, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { supabase } from "./db.js";
-import { authedRepoUrl, cleanWorktree } from "./git.js";
+import { authedRepoUrl } from "./git.js";
 import { spawnPromise } from "./spawn-helpers.js";
 
 const APPS_ROOT = "/data/apps";
@@ -122,7 +122,9 @@ async function spawnPreview(slug: string, branch = "main"): Promise<{ port: numb
       await spawnPromise("git", ["-C", dir, "checkout", "-B", branch, `origin/${branch}`]);
       await spawnPromise("git", ["-C", dir, "reset", "--hard", `origin/${branch}`]);
     } else {
-      await cleanWorktree(""); // no-op para tmp — só garante que o path base existe
+      // NUNCA chamar cleanWorktree("") aqui: fazia rm -rf de /tmp/studio INTEIRO
+      // e matava worktrees de ordens em execução (spawn ENOENT — visto na ordem
+      // aca7d5da, 2026-07-04). O destino do clone é /data/apps, já criado acima.
       await spawnPromise("git", ["clone", "--branch", branch, "--single-branch", authedRepoUrl(app.github_repo), dir]);
     }
     // Install deps (idempotente — npm ci usa lockfile; senão npm install).

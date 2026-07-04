@@ -43,6 +43,11 @@ export function authedRepoUrl(fullName: string): string {
 }
 
 export async function cleanWorktree(orderId: string): Promise<string> {
+  // Guarda-fogo: sem orderId válido, path.join devolvia a RAIZ e o rm
+  // apagava /tmp/studio inteiro — worktrees de ordens ativas incluídos.
+  if (!orderId || orderId.includes("..") || orderId.includes("/")) {
+    throw new Error(`cleanWorktree: orderId inválido ("${orderId}")`);
+  }
   const dir = path.join(CONFIG.WORKTREE_ROOT, orderId);
   await rm(dir, { recursive: true, force: true });
   await mkdir(dir, { recursive: true });
