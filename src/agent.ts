@@ -57,6 +57,7 @@ export async function runAgent(input: AgentInput): Promise<AgentRun> {
   } : undefined;
 
   let finalText = "";
+  let gotSuccess = false; // já houve um result:success — o trabalho ficou no worktree
   let tokensUsed = 0;
   let sessionId: string | null = null;
   const mcpToolsFaltantes: string[] = [];
@@ -224,8 +225,13 @@ export async function runAgent(input: AgentInput): Promise<AgentRun> {
     }
 
     if (m.type === "result") {
-      if (input.orderId) runlog(input.orderId, "info", `sdk:result ${(m as { subtype?: string }).subtype ?? ""} em ${Math.round((Date.now() - startAt) / 1000)}s`).catch(() => {});
-      finalText = ((m as { result?: string }).result) ?? "";
+      const subtype = (m as { subtype?: string }).subtype ?? "";
+      if (input.orderId) runlog(input.orderId, "info", `sdk:result ${subtype} em ${Math.round((Date.now() - startAt) / 1000)}s`).catch(() => {});
+      // O SDK às vezes emite result:success E DEPOIS result:error_during_execution
+      // (com result vazio). NÃO sobrescrever o texto bom com o vazio do erro, e
+      // marcar que já houve um resultado válido — o trabalho ficou feito no worktree.
+      const r = ((m as { result?: string }).result) ?? "";
+      if (subtype === "success" || r) { finalText = r || finalText; gotSuccess = true; }
       const u = ((m as { usage?: Record<string, number>; total_usage?: Record<string, number> }).usage
         ?? (m as { total_usage?: Record<string, number> }).total_usage
         ?? {}) as Record<string, number>;
@@ -257,6 +263,13 @@ export async function runAgent(input: AgentInput): Promise<AgentRun> {
 
   try {
     await Promise.race([consume(), hardTimeout, postAbortExit]);
+  } catch (e) {
+    // O SDK por vezes emite result:success e DEPOIS o subprocesso sai com código 1
+    // (error_during_execution) — visto a matar runs JÁ FEITAS. Se já temos um
+    // resultado válido, o trabalho está no worktree: não deites fora, segue para
+    // commit/deploy. Só propaga o erro se nunca houve sucesso.
+    if (!gotSuccess) throw e;
+    if (input.orderId) runlog(input.orderId, "stderr", `SDK saiu com erro após sucesso — a usar o resultado válido (${e instanceof Error ? e.message.slice(0, 80) : String(e).slice(0, 80)})`).catch(() => {});
   } finally {
     clearInterval(guard);
     if (hardTimer) clearTimeout(hardTimer);
