@@ -124,6 +124,17 @@ async function limparDiscoArranque() {
 }
 await limparDiscoArranque();
 
+// LOCKS ÓRFÃOS (2026-07-04): num restart, os Sets in-flight in-memory zeram
+// mas os studio_locks na BD persistem → orders dessa app nunca avançam e o
+// poll entra em hot-loop a relançá-las. No boot, NADA está in-flight, logo
+// todos os locks são órfãos → limpa. (Causou 1h53 de worker preso.)
+async function limparLocksOrfaos() {
+  const { supabase } = await import("./db.js");
+  const { error, count } = await supabase.from("studio_locks").delete({ count: "exact" }).not("app_id", "is", null);
+  console.log(error ? `locks: falha ao limpar (${error.message})` : `locks: ${count ?? 0} órfãos limpos no arranque`);
+}
+await limparLocksOrfaos();
+
 // Fatia 3b/3c: arranca o router HTTP em paralelo ao poll loop, no mesmo processo Node.
 // A porta 8080 fica exposta pelo Fly [http_service]. Idle sweeper mata dev servers
 // sem tráfego há mais de 20 min.
