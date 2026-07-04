@@ -179,13 +179,18 @@ export async function smokeTest(previewUrl: string, rotas: string[] = ["/"]): Pr
         const btn = buttons[i];
         const label = `${rota}#${(await btn.textContent().catch(() => ""))?.slice(0, 30) ?? `btn${i}`}`;
         const urlBefore = page.url();
-        const domBefore = await page.evaluate("document.body.innerHTML.length").catch(() => 0) as number;
+        // HASH do DOM, não comprimento: um filtro que move a classe "ativo" de
+        // um botão para outro muda o conteúdo mas NÃO o tamanho — comparar
+        // length dava falso "botão morto" (3 iterações queimadas na ordem
+        // aca7d5da, 2026-07-05). O hash deteta qualquer mudança real.
+        const DOM_HASH = "(()=>{let h=0;const s=document.body.innerHTML;for(let i=0;i<s.length;i++){h=(h*31+s.charCodeAt(i))|0}return h})()";
+        const domBefore = await page.evaluate(DOM_HASH).catch(() => 0) as number;
         const scrollBefore = await page.evaluate("window.scrollY").catch(() => 0) as number;
         try {
           await btn.click({ timeout: 3000, trial: false });
           await page.waitForTimeout(700);
           const urlAfter = page.url();
-          const domAfter = await page.evaluate("document.body.innerHTML.length").catch(() => 0) as number;
+          const domAfter = await page.evaluate(DOM_HASH).catch(() => 0) as number;
           const scrollAfter = await page.evaluate("window.scrollY").catch(() => 0) as number;
           const fezScroll = Math.abs(scrollAfter - scrollBefore) >= 4; // scroll-to-secção é efeito VÁLIDO
           if (urlAfter !== urlBefore) {
