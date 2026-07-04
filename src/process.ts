@@ -80,23 +80,12 @@ export async function processOrder(order: OrderRow): Promise<void> {
 
   let lastError: string | null = null;
   let currentEstrategia: Estrategia = "padrao";
+  // C2.1 RESUME só DENTRO da mesma ordem (retries partilham o worktree, logo
+  // o estado de sessão do SDK em .claude/ persiste). Cross-ordem NÃO — cada
+  // ordem clona um worktree fresco e o resume de uma sessão de outro worktree
+  // faz o subprocesso do SDK morrer (exit 1). A continuidade real entre
+  // ordens precisa do SessionStore Postgres (GAPS: sessionstore-postgres).
   let sessionId = order.session_id;
-  // C2.1: UMA conversa contínua por app — ordens são turnos da mesma sessão.
-  // Sem sessão própria, retoma a última sessão conhecida da APP (o agente
-  // lembra-se do que fez sem re-ler tudo).
-  if (!sessionId) {
-    const { data: ultima } = await supabase
-      .from("studio_orders")
-      .select("session_id")
-      .eq("app_id", order.app_id)
-      .not("session_id", "is", null)
-      .neq("id", order.id)
-      .order("updated_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    sessionId = (ultima as { session_id: string | null } | null)?.session_id ?? null;
-    if (sessionId) await runlog(order.id, "info", `sdk:resume sessão da app ${sessionId.slice(0, 8)}…`);
-  }
   let totalTokens = 0;
   const allToolsUsadas: Array<{ name: string; input: unknown }> = [];
   let allFinalText = "";
