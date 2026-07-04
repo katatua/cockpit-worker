@@ -142,6 +142,30 @@ async function limparLocksOrfaos() {
 }
 await limparLocksOrfaos();
 
+// ORDENS ÓRFÃS (2026-07-04): no arranque NADA está a correr → qualquer ordem
+// em 'em_execucao' ficou órfã de um worker anterior (deploy/crash/OOM). Como o
+// pickup só apanha rascunho/em_fila, ela NUNCA mais avançaria: o painel roda
+// para sempre E o utilizador fica bloqueado (novas mensagens viram steering
+// para uma ordem morta). Marca-as falhou-retryable → o utilizador recupera num
+// clique ("Tentar de novo") e volta a poder criar ordens. Isto também torna
+// SEGURO fazer deploy do worker a meio de uma ordem: ela é recuperada, não perdida.
+async function recuperarOrdensOrfas() {
+  const { supabase } = await import("./db.js");
+  const { data, error } = await supabase.from("studio_orders")
+    .update({ estado: "falhou", erro: "A construção foi interrompida (o motor reiniciou). Carrega em «Tentar de novo» para retomar — não perdeste nada." })
+    .eq("estado", "em_execucao")
+    .select("id, app_id, user_id");
+  if (error) { console.log(`ordens órfãs: falha ao recuperar (${error.message})`); return; }
+  const orfas = data ?? [];
+  console.log(`ordens órfãs: ${orfas.length} em_execucao recuperadas (falhou-retryable)`);
+  // Evento + mensagem honesta no chat de cada uma, para o utilizador perceber.
+  for (const o of orfas as { id: string; app_id: string; user_id: string }[]) {
+    await supabase.from("studio_events").insert({ app_id: o.app_id, order_id: o.id, user_id: o.user_id, tipo: "order.interrompida", payload: { motivo: "worker restart" } }).then(() => {}, () => {});
+    await supabase.from("studio_messages").insert({ app_id: o.app_id, order_id: o.id, user_id: o.user_id, autor: "sistema", tipo: "erro_humano", conteudo: { text: "A construção foi interrompida porque o motor reiniciou. Carrega em «Tentar de novo» — retomo daqui." } }).then(() => {}, () => {});
+  }
+}
+await recuperarOrdensOrfas();
+
 // Fatia 3b/3c: arranca o router HTTP em paralelo ao poll loop, no mesmo processo Node.
 // A porta 8080 fica exposta pelo Fly [http_service]. Idle sweeper mata dev servers
 // sem tráfego há mais de 20 min.
@@ -161,6 +185,33 @@ setInterval(() => { lruDevServers().catch(() => {}); }, 10 * 60_000);
 const MAX_CONCURRENT = 2;
 const inflightOrders = new Set<string>();
 const inflightApps = new Set<string>();
+
+// REAPER PERIÓDICO (2026-07-04, FIX 2): o watchdog do agente é IN-PROCESS (morre
+// com o worker) e só cobre a janela do SDK. Uma ordem pode ficar presa em
+// 'em_execucao' FORA dela (clone, npm install, deploy, quality gate) sem que
+// nada a resgate. Este reaper (a cada 3 min) marca falhou-retryable qualquer
+// ordem em_execucao SEM progresso no runlog há > LIMITE e que ESTE worker NÃO
+// está a processar (inflight). Garante que nenhuma ordem fica presa para sempre.
+const REAPER_LIMITE_MIN = 15;
+async function reaperOrdensPresas() {
+  const { data: emExec } = await supabase.from("studio_orders").select("id, app_id, user_id").eq("estado", "em_execucao");
+  for (const o of (emExec ?? []) as { id: string; app_id: string; user_id: string }[]) {
+    if (inflightOrders.has(o.id)) continue; // este worker está mesmo a processá-la
+    const { data: ult } = await supabase.from("studio_runlog").select("created_at").eq("order_id", o.id).order("seq", { ascending: false }).limit(1).maybeSingle();
+    const ultMs = ult?.created_at ? Date.parse(ult.created_at as string) : 0;
+    const idadeMin = ultMs ? (Date.now() - ultMs) / 60000 : Infinity;
+    if (idadeMin < REAPER_LIMITE_MIN) continue; // progresso recente → deixa
+    const { data: recuperada } = await supabase.from("studio_orders")
+      .update({ estado: "falhou", erro: "A construção ficou parada e foi interrompida. Carrega em «Tentar de novo» — retomo daqui." })
+      .eq("id", o.id).eq("estado", "em_execucao").select("id");
+    if (recuperada && recuperada.length) {
+      await supabase.from("studio_locks").delete().eq("app_id", o.app_id).then(() => {}, () => {});
+      await supabase.from("studio_messages").insert({ app_id: o.app_id, order_id: o.id, user_id: o.user_id, autor: "sistema", tipo: "erro_humano", conteudo: { text: "A construção ficou parada demasiado tempo, por isso interrompi-a. Carrega em «Tentar de novo»." } }).then(() => {}, () => {});
+      console.log(`reaper: ordem ${o.id.slice(0, 8)} presa (${Math.round(idadeMin)}min sem progresso) → falhou-retryable`);
+    }
+  }
+}
+setInterval(() => { reaperOrdensPresas().catch((e) => console.warn("reaper erro:", e?.message)); }, 3 * 60_000);
 
 async function nextEligible(): Promise<OrderRow | null> {
   const { data: bloqueadas } = await supabase.from("studio_campaigns").select("id").eq("estado", "bloqueada");
