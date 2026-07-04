@@ -142,29 +142,46 @@ async function limparLocksOrfaos() {
 }
 await limparLocksOrfaos();
 
-// ORDENS ÓRFÃS (2026-07-04): no arranque NADA está a correr → qualquer ordem
-// em 'em_execucao' ficou órfã de um worker anterior (deploy/crash/OOM). Como o
-// pickup só apanha rascunho/em_fila, ela NUNCA mais avançaria: o painel roda
-// para sempre E o utilizador fica bloqueado (novas mensagens viram steering
-// para uma ordem morta). Marca-as falhou-retryable → o utilizador recupera num
-// clique ("Tentar de novo") e volta a poder criar ordens. Isto também torna
-// SEGURO fazer deploy do worker a meio de uma ordem: ela é recuperada, não perdida.
-async function recuperarOrdensOrfas() {
-  const { supabase } = await import("./db.js");
-  const { data, error } = await supabase.from("studio_orders")
-    .update({ estado: "falhou", erro: "A construção foi interrompida (o motor reiniciou). Carrega em «Tentar de novo» para retomar — não perdeste nada." })
-    .eq("estado", "em_execucao")
-    .select("id, app_id, user_id");
-  if (error) { console.log(`ordens órfãs: falha ao recuperar (${error.message})`); return; }
-  const orfas = data ?? [];
-  console.log(`ordens órfãs: ${orfas.length} em_execucao recuperadas (falhou-retryable)`);
-  // Evento + mensagem honesta no chat de cada uma, para o utilizador perceber.
-  for (const o of orfas as { id: string; app_id: string; user_id: string }[]) {
-    await supabase.from("studio_events").insert({ app_id: o.app_id, order_id: o.id, user_id: o.user_id, tipo: "order.interrompida", payload: { motivo: "worker restart" } }).then(() => {}, () => {});
-    await supabase.from("studio_messages").insert({ app_id: o.app_id, order_id: o.id, user_id: o.user_id, autor: "sistema", tipo: "erro_humano", conteudo: { text: "A construção foi interrompida porque o motor reiniciou. Carrega em «Tentar de novo» — retomo daqui." } }).then(() => {}, () => {});
+// AUTO-RECUPERAÇÃO DE ORDENS (2026-07-04) — princípio: NUNCA o utilizador tem de
+// clicar nem esperar. Uma ordem em_execucao interrompida (worker morto/reiniciado
+// ou sem heartbeat) volta AUTOMATICAMENTE a em_fila e o worker RETOMA-A sozinho.
+// Teto de recuperações (3) para não fazer loop numa ordem tóxica (ex.: OOM
+// sempre na mesma) e proteger os outros apps; nesse último caso falha com
+// mensagem clara, mas a app continua 100% usável.
+type OrdemOrfa = { id: string; app_id: string; user_id: string; recuperacoes: number | null };
+const MAX_RECUPERACOES = 3;
+async function recuperarOrdem(o: OrdemOrfa, motivo: string): Promise<void> {
+  const rec = o.recuperacoes ?? 0;
+  if (rec >= MAX_RECUPERACOES) {
+    const { data: ok } = await supabase.from("studio_orders")
+      .update({ estado: "falhou", erro: "Não consegui concluir esta construção após várias tentativas automáticas. Descreve de outra forma e eu recomeço." })
+      .eq("id", o.id).eq("estado", "em_execucao").select("id");
+    if (ok && ok.length) {
+      await supabase.from("studio_locks").delete().eq("app_id", o.app_id).then(() => {}, () => {});
+      await supabase.from("studio_messages").insert({ app_id: o.app_id, order_id: o.id, user_id: o.user_id, autor: "sistema", tipo: "erro_humano", conteudo: { text: "Tentei retomar esta construção várias vezes sem sucesso. Diz-me de outra forma o que queres — estou pronto." } }).then(() => {}, () => {});
+      console.log(`recuperar: ordem ${o.id.slice(0, 8)} esgotou auto-recuperações → falhou`);
+    }
+    return;
+  }
+  // Auto-requeue: volta a em_fila para o worker retomar SOZINHO (sem clique).
+  const { data: ok } = await supabase.from("studio_orders")
+    .update({ estado: "em_fila", recuperacoes: rec + 1, heartbeat_at: null })
+    .eq("id", o.id).eq("estado", "em_execucao").select("id");
+  if (ok && ok.length) {
+    await supabase.from("studio_locks").delete().eq("app_id", o.app_id).then(() => {}, () => {});
+    await supabase.from("studio_messages").insert({ app_id: o.app_id, order_id: o.id, user_id: o.user_id, autor: "sistema", tipo: "atividade", conteudo: { text: "Fui interrompido, mas retomei a construção sozinho — não precisas de fazer nada." } }).then(() => {}, () => {});
+    await supabase.from("studio_events").insert({ app_id: o.app_id, order_id: o.id, user_id: o.user_id, tipo: "order.auto_recuperada", payload: { motivo, recuperacoes: rec + 1 } }).then(() => {}, () => {});
+    console.log(`recuperar: ordem ${o.id.slice(0, 8)} → em_fila (auto-retoma, ${rec + 1}ª · ${motivo})`);
   }
 }
-await recuperarOrdensOrfas();
+// ARRANQUE: nada está a correr → toda a ordem em_execucao é órfã. Auto-requeue.
+async function recuperarOrdensOrfasArranque() {
+  const { data } = await supabase.from("studio_orders").select("id, app_id, user_id, recuperacoes").eq("estado", "em_execucao");
+  const orfas = (data ?? []) as OrdemOrfa[];
+  console.log(`ordens órfãs no arranque: ${orfas.length} → auto-requeue`);
+  for (const o of orfas) await recuperarOrdem(o, "reinício do motor");
+}
+await recuperarOrdensOrfasArranque();
 
 // Fatia 3b/3c: arranca o router HTTP em paralelo ao poll loop, no mesmo processo Node.
 // A porta 8080 fica exposta pelo Fly [http_service]. Idle sweeper mata dev servers
@@ -186,32 +203,24 @@ const MAX_CONCURRENT = 2;
 const inflightOrders = new Set<string>();
 const inflightApps = new Set<string>();
 
-// REAPER PERIÓDICO (2026-07-04, FIX 2): o watchdog do agente é IN-PROCESS (morre
-// com o worker) e só cobre a janela do SDK. Uma ordem pode ficar presa em
-// 'em_execucao' FORA dela (clone, npm install, deploy, quality gate) sem que
-// nada a resgate. Este reaper (a cada 3 min) marca falhou-retryable qualquer
-// ordem em_execucao SEM progresso no runlog há > LIMITE e que ESTE worker NÃO
-// está a processar (inflight). Garante que nenhuma ordem fica presa para sempre.
-const REAPER_LIMITE_MIN = 15;
+// REAPER (2026-07-04): rede de segurança para o caso worker-VIVO-mas-preso FORA
+// da janela do watchdog do SDK (clone, npm, deploy…). Usa o HEARTBEAT: uma ordem
+// em_execucao sem heartbeat há > 2 min (escreve a cada 30s) está morta → auto-
+// requeue (retoma sozinha). Corre a cada 60s. O caso INTERATIVO (o utilizador
+// envia mensagem) já é recuperado na hora pela liveness do POST /orders.
+const REAPER_HEARTBEAT_MIN = 2;
 async function reaperOrdensPresas() {
-  const { data: emExec } = await supabase.from("studio_orders").select("id, app_id, user_id").eq("estado", "em_execucao");
-  for (const o of (emExec ?? []) as { id: string; app_id: string; user_id: string }[]) {
+  const { data: emExec } = await supabase.from("studio_orders").select("id, app_id, user_id, recuperacoes, heartbeat_at").eq("estado", "em_execucao");
+  const agora = Date.now();
+  for (const o of (emExec ?? []) as (OrdemOrfa & { heartbeat_at: string | null })[]) {
     if (inflightOrders.has(o.id)) continue; // este worker está mesmo a processá-la
-    const { data: ult } = await supabase.from("studio_runlog").select("created_at").eq("order_id", o.id).order("seq", { ascending: false }).limit(1).maybeSingle();
-    const ultMs = ult?.created_at ? Date.parse(ult.created_at as string) : 0;
-    const idadeMin = ultMs ? (Date.now() - ultMs) / 60000 : Infinity;
-    if (idadeMin < REAPER_LIMITE_MIN) continue; // progresso recente → deixa
-    const { data: recuperada } = await supabase.from("studio_orders")
-      .update({ estado: "falhou", erro: "A construção ficou parada e foi interrompida. Carrega em «Tentar de novo» — retomo daqui." })
-      .eq("id", o.id).eq("estado", "em_execucao").select("id");
-    if (recuperada && recuperada.length) {
-      await supabase.from("studio_locks").delete().eq("app_id", o.app_id).then(() => {}, () => {});
-      await supabase.from("studio_messages").insert({ app_id: o.app_id, order_id: o.id, user_id: o.user_id, autor: "sistema", tipo: "erro_humano", conteudo: { text: "A construção ficou parada demasiado tempo, por isso interrompi-a. Carrega em «Tentar de novo»." } }).then(() => {}, () => {});
-      console.log(`reaper: ordem ${o.id.slice(0, 8)} presa (${Math.round(idadeMin)}min sem progresso) → falhou-retryable`);
-    }
+    const hbMs = o.heartbeat_at ? Date.parse(o.heartbeat_at) : 0;
+    const idadeMin = hbMs ? (agora - hbMs) / 60000 : Infinity;
+    if (idadeMin < REAPER_HEARTBEAT_MIN) continue; // heartbeat fresco → viva
+    await recuperarOrdem(o, "sem heartbeat");
   }
 }
-setInterval(() => { reaperOrdensPresas().catch((e) => console.warn("reaper erro:", e?.message)); }, 3 * 60_000);
+setInterval(() => { reaperOrdensPresas().catch((e) => console.warn("reaper erro:", e?.message)); }, 60_000);
 
 async function nextEligible(): Promise<OrderRow | null> {
   const { data: bloqueadas } = await supabase.from("studio_campaigns").select("id").eq("estado", "bloqueada");

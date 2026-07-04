@@ -72,9 +72,17 @@ export async function processOrder(order: OrderRow): Promise<void> {
 
   resetRunlogSeq(order.id);
   let plano = makePlan();
-  await supabase.from("studio_orders").update({ estado: "em_execucao", plano }).eq("id", order.id);
+  await supabase.from("studio_orders").update({ estado: "em_execucao", plano, heartbeat_at: new Date().toISOString() }).eq("id", order.id);
   await event(order.app_id, order.id, order.user_id, "worker.arranque", { worker: CONFIG.WORKER_ID, modo: order.modo });
   await runlog(order.id, "info", `worker=${CONFIG.WORKER_ID} arranque · modo=${order.modo}`);
+
+  // HEARTBEAT DE LIVENESS (2026-07-04): a ordem prova que está VIVA a cada 30s,
+  // INDEPENDENTE do trabalho do agente — por isso mantém-se fresco mesmo durante
+  // um npm/build longo (que não escreve runlog). É o sinal fiável para: recuperar
+  // ordens mortas na hora (o utilizador não espera) e nunca ficar bloqueado.
+  const hbTimer = setInterval(() => {
+    supabase.from("studio_orders").update({ heartbeat_at: new Date().toISOString() }).eq("id", order.id).then(() => {}, () => {});
+  }, 30_000);
 
   // Fatia B · heartbeat a cada 8s se houver silêncio > 6s no chat.
   const stopHeartbeat = startHeartbeat({ appId: order.app_id, orderId: order.id, userId: order.user_id });
@@ -539,6 +547,7 @@ export async function processOrder(order: OrderRow): Promise<void> {
     }
     await fail(order, motivo);
   } finally {
+    clearInterval(hbTimer);
     stopHeartbeat();
     await unlock(order.app_id);
     await event(order.app_id, order.id, order.user_id, "worker.lock_libertado", {});
