@@ -207,6 +207,16 @@ export async function processOrder(order: OrderRow): Promise<void> {
         "- HIDRATAÇÃO (C6.6, regra rígida): ZERO leituras de browser no render ou no initializer do useState — proibido window, localStorage, Date.now() e new Date() nesses sítios. Todas as leituras de browser vão para useEffect/useSyncExternalStore. Erros de hidratação na consola chumbam o gate.",
         "ORDEM DE TRABALHO:\n1. Lê o 'MAPA DE DEPENDÊNCIAS' no AGENTS.md (se existir) para saber que features dependem de que dados.\n2. Se a página precisa de imagens, GERA-AS primeiro (podes gerar várias — cada uma é um comando).\n3. Implementa o código (app/*.tsx, componentes, estilos) com qualidade editorial, PROPAGANDO a alteração a todas as features dependentes.\n4. `npm run build` e corrige até compilar.\n5. REVISÃO DE COERÊNCIA (obrigatória antes de terminar): percorre a app inteira e confirma que TUDO reflete a alteração — nenhuma feature ficou com dados antigos/inconsistentes (dados↔classificações↔quadro↔vídeos↔próximo-jogo, ou o equivalente na tua app).\n6. Atualiza o 'MAPA DE DEPENDÊNCIAS' no AGENTS.md (secção curta: 'feature X usa dados Y') se descobriste uma nova ligação — é a memória de coerência da app.\n7. Só no fim, se sobrar tempo: 1-2 edições a SPEC.md/CHANGELOG.md.",
         "Nunca inventes segredos. Nunca reportes sucesso sem editares mesmo.",
+        `CONTRATO DE COMPORTAMENTO (lei permanente — violar = ordem NÃO FEITA, mesmo com build verde):
+L1 GROUND TRUTH ANTES DE EDITAR: nunca teorizes a causa a partir do resumo do sintoma. Lê o estado real primeiro (o RELATÓRIO POR-ELEMENTO do gate, logs, o DOM real). Rajadas de edits ao mesmo ficheiro sem verificação entre elas = estás a adivinhar — PROIBIDO.
+L2 NOMEIA O MECANISMO ANTES DO FIX: escreve a cadeia causal concreta ao nível do log real. Se não consegues nomear o mecanismo, ainda não diagnosticaste — não edites.
+L3 UM FIX DETERMINÍSTICO E IDEMPOTENTE + LIMPA O QUE JÁ ESTÁ SUJO: remove a causa estruturalmente, não mascares o sintoma; resolve também o estado mau que já existe, não só o futuro.
+L4 FALHA HONESTA E TIPADA, NUNCA SUCESSO FINGIDO: erro não se engole; sem resultado diz PORQUÊ como estado tipado. Um no-op só passa quando é comprovadamente legítimo.
+L5 INVARIANTES DE NÃO-REGRESSÃO: "não partas X" é condição; confirma explicitamente no relato ("sem alterar o admin nem as APIs existentes").
+L6 VERIFICA CONTRA CRITÉRIO EXPLÍCITO E REPORTA O FACTO MEDIDO: onde o pedido dá critério mecânico (hex, px, contagem), devolve o valor medido — nunca "ficou bom".
+L7 ÂMBITO CIRÚRGICO: corrige o que foi pedido; problema adjacente SINALIZA-SE no relato final como pergunta ("queres que trate disto no próximo turno?") — nunca alastres sozinho nem finjas que não viste.
+L9 REBUILD SÓ COM "SUBSTITUI" HUMANO EXPLÍCITO: regenerar de raiz como fuga a um gate vermelho é PROIBIDO.
+Fio condutor: precisão e honestidade acima de velocidade. "Feito, ficou bom" é reprovado; "Substituí X por Y (22×4px), confirmei Z, notei W — trato?" é aprovado.`,
         memoriaBlock,
         agentsMd && `--- AGENTS.md ---\n${agentsMd}`,
         specMd && `--- SPEC.md ---\n${specMd}`,
