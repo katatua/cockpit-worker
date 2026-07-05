@@ -18,9 +18,14 @@
 import { createServer as createHttp, type IncomingMessage, type ServerResponse } from "node:http";
 import { createConnection } from "node:net";
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { access as fsAccess } from "node:fs/promises";
+import { join as joinPath } from "node:path";
 import type { Socket } from "node:net";
 import { supabase } from "./db.js";
+import { CONFIG } from "./config.js";
 import { ensurePreview, portOf, touch } from "./preview-manager.js";
+
+const WORKTREE_ROOT = CONFIG.WORKTREE_ROOT;
 
 const PREVIEW_SECRET = process.env.PREVIEW_SECRET ?? "";
 
@@ -72,19 +77,20 @@ async function lastVercelPreview(slug: string): Promise<string | null> {
  * (em_execucao mais recente com branch). Sem ordem ativa → main (estado
  * publicado). É isto que garante que o utilizador vê a app a ganhar forma.
  */
-async function activeBranch(slug: string): Promise<string> {
+async function activeOrder(slug: string): Promise<{ branch: string; orderId: string | null }> {
   const { data: app } = await supabase.from("studio_apps").select("id").eq("slug", slug).maybeSingle();
-  if (!app) return "main";
+  if (!app) return { branch: "main", orderId: null };
   const { data: order } = await supabase
     .from("studio_orders")
-    .select("branch")
+    .select("id, branch")
     .eq("app_id", (app as { id: string }).id)
     .eq("estado", "em_execucao")
     .not("branch", "is", null)
     .order("updated_at", { ascending: false })
     .limit(1)
     .maybeSingle();
-  return (order as { branch: string | null } | null)?.branch ?? "main";
+  const o = order as { id: string; branch: string | null } | null;
+  return { branch: o?.branch ?? "main", orderId: o?.id ?? null };
 }
 
 function parseSlugPath(url: string): { slug: string; rest: string } | null {
@@ -110,13 +116,23 @@ async function handlePreview(req: IncomingMessage, res: ServerResponse): Promise
   if (!(await ownsApp(auth.userId!, slug))) { sendJson(res, 403, { error: "não és dono desta app" }); return; }
 
   // C1: o dev server serve a branch da ordem ativa (não main às cegas).
-  const branch = await activeBranch(slug);
-  // Se dev server já está ready NA BRANCH CERTA, proxy directo. Senão,
+  // C1.4 · RASCUNHO AO VIVO: se a ordem ativa tem worktree local COM deps
+  // instaladas, serve-o diretamente — o utilizador vê a app a ganhar forma
+  // a cada ficheiro que o agente escreve, ANTES de qualquer push/deploy.
+  const ativa = await activeOrder(slug);
+  const branch = ativa.branch;
+  let worktreeDir: string | null = null; // null = modo clone explícito
+  if (ativa.orderId) {
+    const wt = joinPath(WORKTREE_ROOT, ativa.orderId);
+    const temDeps = await fsAccess(joinPath(wt, "node_modules")).then(() => true).catch(() => false);
+    if (temDeps) worktreeDir = wt;
+  }
+  // Se dev server já está ready NA BRANCH+RAIZ CERTAS, proxy directo. Senão,
   // arranca em background e devolve estado de carregamento honesto.
-  let port = portOf(slug, branch);
+  let port = portOf(slug, branch, worktreeDir);
   if (!port) {
     // Fire-and-forget: começa o dev server; o próximo request usa-o.
-    ensurePreview(slug, branch).catch((e) => console.warn(`[preview:${slug}] arranque falhou: ${e.message}`));
+    ensurePreview(slug, branch, worktreeDir).catch((e) => console.warn(`[preview:${slug}] arranque falhou: ${e.message}`));
     const vercel = await lastVercelPreview(slug);
     if (vercel) {
       // Redirect 302 para o Vercel URL, preservando o rest do path (sem o /?t=…).

@@ -37,6 +37,7 @@ type PreviewProc = {
   ready: boolean;
   readyPromise: Promise<void>;
   branch: string;    // C1.2: a branch que este dev server está a servir
+  dir: string;       // C1.4: raiz servida — /data/apps/<slug> OU o worktree da ordem
   lastPull: number;  // C1: throttle do refresh (fetch+reset) por pedido
 };
 
@@ -65,13 +66,15 @@ function nextPort(): number {
  * certa. Pedidos com a mesma branch fazem refresh throttled (fetch+reset a
  * cada ≥20s) — o próximo hot-reload do Next apanha os commits do agente.
  */
-export async function ensurePreview(slug: string, branch = "main"): Promise<{ port: number; ready: boolean }> {
+export async function ensurePreview(slug: string, branch = "main", worktreeDir?: string | null): Promise<{ port: number; ready: boolean }> {
+  const desiredDir = worktreeDir ?? join(APPS_ROOT, slug);
   const existing = running.get(slug);
   if (existing) {
     existing.lastActive = Date.now();
-    if (existing.branch !== branch) {
-      // C1.2: ordem ativa mudou de branch → reinicia na branch certa.
-      console.log(`[preview:${slug}] branch ${existing.branch} → ${branch} · reiniciar`);
+    if (existing.branch !== branch || existing.dir !== desiredDir) {
+      // C1.2/C1.4: ordem ativa mudou de branch OU de modo (worktree↔clone)
+      // → reinicia na raiz certa.
+      console.log(`[preview:${slug}] ${existing.branch}@${existing.dir} → ${branch}@${desiredDir} · reiniciar`);
       stop(slug);
     } else {
       if (!existing.ready) {
@@ -86,21 +89,24 @@ export async function ensurePreview(slug: string, branch = "main"): Promise<{ po
   }
   const emCurso = inflight.get(slug);
   if (emCurso) return emCurso;
-  const p = spawnPreview(slug, branch).finally(() => inflight.delete(slug));
+  const p = spawnPreview(slug, branch, worktreeDir ?? undefined).finally(() => inflight.delete(slug));
   inflight.set(slug, p);
   return p;
 }
 
-/** C1: refresh throttled da branch em curso — fetch+reset; o Next dev faz o resto. */
+/** C1: refresh throttled da branch em curso — fetch+reset; o Next dev faz o resto.
+ *  C1.4: em modo worktree NÃO há git — o agente edita os ficheiros no próprio
+ *  disco e o `next dev` faz hot-reload direto. */
 async function refreshBranch(rec: PreviewProc): Promise<void> {
+  if (rec.dir !== join(APPS_ROOT, rec.slug)) return; // worktree: sem git refresh
   if (Date.now() - rec.lastPull < 20_000) return;
   rec.lastPull = Date.now();
-  const dir = join(APPS_ROOT, rec.slug);
+  const dir = rec.dir;
   await spawnPromise("git", ["-C", dir, "fetch", "--depth", "1", "origin", rec.branch]).catch(() => {});
   await spawnPromise("git", ["-C", dir, "reset", "--hard", `origin/${rec.branch}`]).catch(() => {});
 }
 
-async function spawnPreview(slug: string, branch = "main"): Promise<{ port: number; ready: boolean }> {
+async function spawnPreview(slug: string, branch = "main", worktreeDir?: string): Promise<{ port: number; ready: boolean }> {
   const app = await loadApp(slug);
   if (!app) throw new Error(`preview: app ${slug} não existe`);
   if (!app.github_repo) throw new Error(`preview: ${slug} sem github_repo`);
@@ -109,7 +115,19 @@ async function spawnPreview(slug: string, branch = "main"): Promise<{ port: numb
   usedPorts.add(port);
   await updateStatus(app.id, "a_arrancar", port);
 
-  const dir = join(APPS_ROOT, slug);
+  const dir = worktreeDir ?? join(APPS_ROOT, slug);
+
+  if (worktreeDir) {
+    // C1.4 · RASCUNHO AO VIVO: serve o worktree da ordem diretamente — o
+    // "build simples antes do build final". Sem clone nem npm: o worker já
+    // instalou as deps; se ainda não instalou, 503 e o iframe re-tenta.
+    const temDeps = await access(join(dir, "node_modules")).then(() => true).catch(() => false);
+    if (!temDeps) {
+      usedPorts.delete(port);
+      throw new Error("worktree ainda sem node_modules — o worker está a instalar; tenta já a seguir");
+    }
+    console.log(`[preview:${slug}] a arrancar em porta ${port} · WORKTREE ${dir} (rascunho ao vivo)`);
+  } else {
   await mkdir(dir, { recursive: true });
 
   const alreadyCloned = await access(join(dir, ".git")).then(() => true).catch(() => false);
@@ -147,18 +165,25 @@ async function spawnPreview(slug: string, branch = "main"): Promise<{ port: numb
     await updateStatus(app.id, "erro", null, e instanceof Error ? e.message : String(e));
     throw e;
   }
+  }
 
   // Spawn `next dev` — usa `npm run dev` para respeitar scripts do repo.
+  // C1.4: em modo worktree, NEXT_DIST_DIR separa o output do dev (.next-dev)
+  // do `npm run build` do agente (.next) — zero contenção nos scaffolds que
+  // honram a env (next.config: distDir: process.env.NEXT_DIST_DIR ?? ".next").
   const proc = spawn("npm", ["run", "dev", "--", "--port", String(port), "--hostname", "0.0.0.0"], {
     cwd: dir,
-    env: { ...process.env, PORT: String(port), NODE_ENV: "development" },
+    env: {
+      ...process.env, PORT: String(port), NODE_ENV: "development",
+      ...(worktreeDir ? { NEXT_DIST_DIR: ".next-dev" } : {}),
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
 
   let resolveReady: () => void;
   let rejectReady: (e: Error) => void;
   const readyPromise = new Promise<void>((res, rej) => { resolveReady = res; rejectReady = rej; });
-  const rec: PreviewProc = { slug, appId: app.id, port, proc, startedAt: Date.now(), lastActive: Date.now(), ready: false, readyPromise, branch, lastPull: Date.now() };
+  const rec: PreviewProc = { slug, appId: app.id, port, proc, startedAt: Date.now(), lastActive: Date.now(), ready: false, readyPromise, branch, dir, lastPull: Date.now() };
   running.set(slug, rec);
 
   // Deteta "Ready" na stdout do Next para saber que aceita conexões.
@@ -216,11 +241,15 @@ export function touch(slug: string): void {
 }
 
 /** Devolve porta se dev server para esse slug está ready — usado pelo router.
- *  C1.2: com `branch`, só devolve se o servidor está NA branch certa. */
-export function portOf(slug: string, branch?: string): number | null {
+ *  C1.2: com `branch`, só devolve se o servidor está NA branch certa.
+ *  C1.4: com `dir`, só devolve se está a servir a RAIZ certa (worktree↔clone). */
+export function portOf(slug: string, branch?: string, dir?: string | null): number | null {
   const rec = running.get(slug);
   if (!rec?.ready) return null;
   if (branch && rec.branch !== branch) return null;
+  // dir=string → tem de servir ESSE worktree; dir=null → tem de ser modo
+  // clone (/data/apps); dir=undefined → sem verificação de raiz.
+  if (dir !== undefined && rec.dir !== (dir ?? join(APPS_ROOT, slug))) return null;
   return rec.port;
 }
 

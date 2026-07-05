@@ -21,7 +21,7 @@ import { cleanWorktree, shallowClone, createBranch, hasChanges, commitAll, push,
 import { runAgent } from "./agent.js";
 import { STUDIO_IMAGE_SCRIPT } from "./image-script.js";
 import { gerarAceitacao, validarAceitacao } from "./aceitacao.js";
-import { ensurePreview } from "./preview-manager.js";
+import { ensurePreview, stop as stopPreview } from "./preview-manager.js";
 import { waitForPreviewDeploy } from "./vercel.js";
 import { checkQuality, verificarVideos } from "./quality.js";
 import { smokeTest } from "./smoke.js";
@@ -611,6 +611,13 @@ export async function processOrder(order: OrderRow): Promise<void> {
     // DISCO (2026-07-04): o worktree da ordem NUNCA era apagado no fim — os
     // clones (+ node_modules) acumulavam em /tmp/studio e enchiam a máquina
     // ("unable to write new index file"). Limpa-se sempre, mesmo em falha.
+    // C1.4: se o dev server do rascunho-ao-vivo estava a servir ESTE worktree,
+    // pára-o primeiro — senão fica agarrado a um diretório apagado.
+    try {
+      const { data: appRow } = await supabase.from("studio_apps").select("slug").eq("id", order.app_id).maybeSingle();
+      const slug = (appRow as { slug: string } | null)?.slug;
+      if (slug) stopPreview(slug);
+    } catch { /* best-effort */ }
     try { await rm(path.join(CONFIG.WORKTREE_ROOT, order.id), { recursive: true, force: true }); } catch { /* best-effort */ }
   }
 }
