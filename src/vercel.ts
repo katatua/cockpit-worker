@@ -26,7 +26,11 @@ export async function waitForPreviewDeploy(projectId: string, branch: string, sh
   let lastState: string | null = null;
 
   while (Date.now() < deadline) {
-    const r = await api(`/v6/deployments?projectId=${projectId}&target=preview&limit=20`);
+    // SEM filtro target=preview: o 1º build de um projeto acabado de linkar
+    // pode sair target=production mesmo numa branch studio/* (visto na ordem
+    // 1bce231c: deployment READY 2s após o push, invisível ao poll → timeout).
+    // O match por SHA torna o target irrelevante — o commit é que manda.
+    const r = await api(`/v6/deployments?projectId=${projectId}&limit=20`);
     if (!r.ok) throw new Error(`Vercel ${r.status}: ${await r.text()}`);
     const json = await r.json() as { deployments: Deployment[] };
 

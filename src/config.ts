@@ -37,7 +37,7 @@ export const CONFIG = {
   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, ANTHROPIC_API_KEY, GITHUB_TOKEN, VERCEL_TOKEN,
   WORKTREE_ROOT: process.env.WORKTREE_ROOT ?? "/tmp/studio",
   POLL_INTERVAL_S: Number(process.env.POLL_INTERVAL_S ?? "5"),
-  DEPLOY_TIMEOUT_S: Number(process.env.DEPLOY_TIMEOUT_S ?? "180"),
+  DEPLOY_TIMEOUT_S: Number(process.env.DEPLOY_TIMEOUT_S ?? "360"), // 180s matava builds frios legítimos (npm install no 1º build de um projeto novo)
   MAX_TOKENS_PER_ORDER: Number(process.env.MAX_TOKENS_PER_ORDER ?? "200000"),
   WORKER_ID: process.env.FLY_MACHINE_ID ?? `local-${process.pid}`,
 };
