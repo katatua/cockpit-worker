@@ -55,6 +55,7 @@ VERIFICÁVEIS e ROBUSTOS. Verifica RESULTADOS VISÍVEIS ao utilizador, NUNCA
 detalhes de IMPLEMENTAÇÃO (a mesma feature pode ser feita de várias formas):
 - tipo "texto": um texto/rótulo que o utilizador deve ver (palavras da intenção, não inventes)
 - tipo "elemento": SÓ elementos estruturais genéricos e universais — button, form, a, h1, input, table, img. PROIBIDO exigir video, iframe, canvas, svg, audio, progress, meter, dialog ou QUALQUER tag específica de implementação — uma barra de progresso feita com div estilizada é tão válida como <progress> (visto no quiz-portugal: 8 iterações queimadas a exigir a tag literal). Para features visuais usa tipo "texto" semântico, nunca a tag.
+- REGRA DE VERIFICABILIDADE (rígida): todos os critérios têm de ser verificáveis na CARGA INICIAL da página, sem interação. PROIBIDO criar critérios sobre estados condicionais que só aparecem DEPOIS de uma ação do utilizador ou de uma falha externa — badges de fallback, toasts de sucesso, mensagens de erro, resultados de pesquisa, conteúdo pós-submit (visto no catalogo-busca: 3 iterações queimadas a exigir um badge que só aparece após pesquisa com fallback). Esses comportamentos são testados pelo smoke, não pela aceitação estática.
 Prefere critérios de TEXTO. Poucos e essenciais. Nada de estética/subjetivo nem de COMO está feito por dentro.`,
       tools: [TOOL],
       tool_choice: { type: "tool", name: "definir_criterios" },
