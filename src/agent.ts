@@ -34,6 +34,7 @@ export type AgentInput = {
   orderId?: string;   // para escrever no runlog
   appId?: string;     // para escrever mensagens atividade
   userId?: string;    // para inserir com user_id preservado
+  model?: string;     // LLM desta iteração (economia: Sonnet por defeito, escalação p/ Fable)
 };
 
 export async function runAgent(input: AgentInput): Promise<AgentRun> {
@@ -139,7 +140,7 @@ export async function runAgent(input: AgentInput): Promise<AgentRun> {
       maxTurns: 200, // C3.2: limite de turnos (loops), nunca de tokens
       systemPrompt: input.systemPrompt,
       abortController,
-      model: "claude-fable-5", // LLM do agente (SDK) — configurável
+      model: input.model ?? CONFIG.WORKER_MODEL, // por iteração: Sonnet por defeito, Fable na escalação
       ...(mcpServers ? { mcpServers } : {}),
       ...(input.resumeSessionId ? { resume: input.resumeSessionId } : {}),
     } as Record<string, unknown>,

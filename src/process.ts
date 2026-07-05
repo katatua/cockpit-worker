@@ -288,6 +288,10 @@ Fio condutor: precisão e honestidade acima de velocidade. "Feito, ficou bom" é
       let runRes: Awaited<ReturnType<typeof runAgent>>;
       let salvaged = false;
       const tAgent0 = Date.now(); // C5.3 telemetria: fase execução
+      // Economia: Sonnet por defeito; escalação para Fable quando o
+      // loop-detector mudou de estratégia (o caso provou-se difícil).
+      const modeloIter = currentEstrategia === "padrao" ? CONFIG.WORKER_MODEL : CONFIG.WORKER_MODEL_ESCALATION;
+      await runlog(order.id, "info", `modelo=${modeloIter}`);
       try {
         runRes = await runAgent({
           cwd: worktree,
@@ -298,6 +302,7 @@ Fio condutor: precisão e honestidade acima de velocidade. "Feito, ficou bom" é
           orderId: order.id,
           appId: order.app_id,
           userId: order.user_id,
+          model: modeloIter,
         });
       } catch (agentErr) {
         const msg = agentErr instanceof Error ? agentErr.message : String(agentErr);

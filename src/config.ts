@@ -40,4 +40,9 @@ export const CONFIG = {
   DEPLOY_TIMEOUT_S: Number(process.env.DEPLOY_TIMEOUT_S ?? "360"), // 180s matava builds frios legítimos (npm install no 1º build de um projeto novo)
   MAX_TOKENS_PER_ORDER: Number(process.env.MAX_TOKENS_PER_ORDER ?? "200000"),
   WORKER_ID: process.env.FLY_MACHINE_ID ?? `local-${process.pid}`,
+  // Economia (2026-07-05, decisão do dono): builds correm em Sonnet 5 por
+  // defeito (~5x mais barato que Fable no preço intro, quase-Opus em código);
+  // quando o loop-detector muda de estratégia (caso difícil), escala p/ Fable.
+  WORKER_MODEL: process.env.WORKER_MODEL ?? "claude-sonnet-5",
+  WORKER_MODEL_ESCALATION: process.env.WORKER_MODEL_ESCALATION ?? "claude-fable-5",
 };
