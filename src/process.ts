@@ -21,7 +21,7 @@ import { cleanWorktree, shallowClone, createBranch, hasChanges, commitAll, push,
 import { runAgent } from "./agent.js";
 import { STUDIO_IMAGE_SCRIPT } from "./image-script.js";
 import { gerarAceitacao, validarAceitacao } from "./aceitacao.js";
-import { ensurePreview, stop as stopPreview } from "./preview-manager.js";
+import { stop as stopPreview } from "./preview-manager.js";
 import { waitForPreviewDeploy } from "./vercel.js";
 import { checkQuality, verificarVideos } from "./quality.js";
 import { smokeTest } from "./smoke.js";
@@ -385,43 +385,12 @@ Fio condutor: precisão e honestidade acima de velocidade. "Feito, ficou bom" é
       await supabase.from("studio_orders").update({ plano, commit_sha: sha, diff_resumo: stat }).eq("id", order.id);
       await event(order.app_id, order.id, order.user_id, "worker.commit", { sha, branch, stat, iter });
 
-      // --- (4b) PRÉ-GATE LOCAL (poupa deploys — item de velocidade 2026-07-06) ---
-      // Corre o link-check contra o DEV SERVER LOCAL (grátis, ~segundos) ANTES de
-      // esperar pelo deploy do Vercel (até 6 min). Se falha aqui, NÃO esperamos o
-      // deploy — vamos já corrigir (a maior fatia do tempo em loops era o deploy
-      // por iteração falhada). O gate AUTORITATIVO (quality+smoke+aceitação no
-      // DEPLOY) mantém-se intacto quando o pré-gate passa → sem falso-positivo,
-      // sem regressão. Fallback honesto: se o dev server não arrancar em 20s,
-      // salta o pré-gate e segue o caminho normal. Kill-switch: STUDIO_PREGATE_LOCAL=0.
-      if (process.env.STUDIO_PREGATE_LOCAL !== "0" && app.slug) {
-        let qLocal: import("./quality.js").QualityReport | null = null;
-        try {
-          const rotasLocal = await discoverRoutes(worktree).catch(() => ["/"]);
-          const prev = await Promise.race([
-            ensurePreview(app.slug, branch, worktree),
-            new Promise<null>((res) => setTimeout(() => res(null), 20_000)),
-          ]);
-          if (prev && prev.ready) {
-            qLocal = await checkQuality(`http://127.0.0.1:${prev.port}`, rotasLocal).catch(() => null);
-          } else {
-            await runlog(order.id, "stderr", "pré-gate local saltado (dev server não pronto em 20s) — segue por deploy");
-          }
-        } catch (e) {
-          await runlog(order.id, "stderr", `pré-gate local saltado: ${e instanceof Error ? e.message.slice(0, 100) : String(e)}`);
-        }
-        if (qLocal && !qLocal.ok) {
-          await runlog(order.id, "info", `pré-gate LOCAL falhou (${qLocal.falhas.length}) — salto o deploy, corrijo já`);
-          lastError = `${qLocal.falhas.length} problemas: ${qLocal.falhas.slice(0, 3).map((f) => `${f.url} — ${f.motivo}`).join("; ")}`;
-          lastDetalhe = JSON.stringify({ falhasQuality: qLocal.falhas }, null, 1); // C6.9
-          await log(order.app_id, order.id, order.user_id, "agente", "erro_humano",
-            qLocal.falhas.length === 1 ? "Um link não está a funcionar. Vou corrigir." : `${qLocal.falhas.length} coisas não funcionam. Vou corrigir.`);
-          const nx = await nextEstrategia(order.id, lastError);
-          currentEstrategia = nx.estrategia;
-          if (nx.esgotada) throw new Error(esgotadaHumana(lastError));
-          continue;
-        }
-        if (qLocal) await runlog(order.id, "info", "pré-gate LOCAL OK — avanço para o deploy");
-      }
+      // NOTA (2026-07-06): tentei um "pré-gate local" (checkQuality contra o dev
+      // server antes do deploy) para poupar deploys em iterações falhadas. REVERTIDO
+      // — o dev server dá FALSOS NEGATIVOS (visto: mudança trivial de h1 correta,
+      // mas o link-check local chumbou → loop de 7min a caçar um fantasma). Confirma
+      // a razão documentada em (5) para a verificação correr contra o DEPLOY. O
+      // deploy-once real exige primeiro tornar o dev server fiável (backlog).
 
       // --- (5) Vercel deploy + (6b-paralelo) smoke LOCAL na branch ---
       // C5.2: o poll do deploy corre EM PARALELO com o smoke no dev server
