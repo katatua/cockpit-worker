@@ -42,8 +42,17 @@ async function baixar(url, out) {
   const img = await fetch(url);
   const buf = Buffer.from(await img.arrayBuffer());
   await mkdir(dirname(out), { recursive: true });
-  await writeFile(out, buf);
-  return { out, kb: Math.round(buf.length / 1024) };
+  // Os bytes TÊM de bater com a extensão. O fal.ai devolve JPEG; se o destino é
+  // .webp, reencodamos para WEBP genuíno (senão o otimizador do Vercel devolve 400:
+  // Content-Type image/webp vs bytes JPEG). RIFF/WEBP já correto → não mexe.
+  let bytes = buf;
+  const isWebp = buf.length > 12 && buf.toString("ascii", 0, 4) === "RIFF" && buf.toString("ascii", 8, 12) === "WEBP";
+  if (out.toLowerCase().endsWith(".webp") && !isWebp) {
+    try { const sharp = (await import("sharp")).default; bytes = await sharp(buf).webp({ quality: 82 }).toBuffer(); }
+    catch (e) { console.warn("[img] sem sharp para reencodar webp (" + (e && e.message) + ") — escrevo bytes crus"); }
+  }
+  await writeFile(out, bytes);
+  return { out, kb: Math.round(bytes.length / 1024) };
 }
 
 async function viaFal({ prompt, out, aspect, model }) {
