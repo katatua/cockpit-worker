@@ -199,9 +199,12 @@ setInterval(() => { lruDevServers().catch(() => {}); }, 10 * 60_000);
 // Processamos até MAX_CONCURRENT ordens em paralelo, de APPS DIFERENTES
 // (studio_locks já garante 1 ordem/app; o in-flight set evita duplo arranque
 // da mesma ordem entre o poll e o lock).
-// 2026-07-03: 3→2 depois de OOM real (npm de 2 agentes + dev server + chromium
-// nao cabem em 1GB; 2 concurrent + 2GB + swap aguenta).
-const MAX_CONCURRENT = 2;
+// 2026-07-03: 3→2 depois de OOM real. 2026-07-06: 2→1 — provado em produção que
+// 2 concorrentes ainda saturam (2× next build ~1GB + Chromium do smoke em 2 CPUs
+// partilhados / 2GB SEM swap → os builds THRASHAM e penduram ~10min; visto no ps).
+// Serializar dá a máquina inteira a cada ordem → build ~60-90s, sem hang. Para
+// paralelismo real, escalar a VM (shared-cpu-4x + swap) e subir isto.
+const MAX_CONCURRENT = Number(process.env.STUDIO_MAX_CONCURRENT ?? "1");
 const inflightOrders = new Set<string>();
 const inflightApps = new Set<string>();
 
