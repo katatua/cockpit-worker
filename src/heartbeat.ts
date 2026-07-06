@@ -11,8 +11,11 @@
 import { supabase } from "./db.js";
 import { HEARTBEAT_PHRASES } from "./humanize.js";
 
-const INTERVAL_MS = 8_000;
-const SILENCE_THRESHOLD_MS = 6_000;
+// 2026-07-06: 8→14s + limiar 6→11s. O heartbeat só deve encher o SILÊNCIO real
+// (o LLM a pensar entre rajadas de tools); a 8s enchia demasiado e a narração
+// genérica parecia "presa a pensar" por cima da atividade real. Menos é mais.
+const INTERVAL_MS = 14_000;
+const SILENCE_THRESHOLD_MS = 11_000;
 
 export function startHeartbeat(ctx: { appId: string; orderId: string; userId: string }): () => void {
   let idx = 0;

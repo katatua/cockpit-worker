@@ -93,11 +93,13 @@ export function humanizeToolUse(name: string, input: ToolInput): string | null {
  * houver actividade recente durante `em_execucao`. Ordenadas para dar
  * sentido de progresso mesmo sendo genéricas.
  */
+// Frases calmas e honestas para o SILÊNCIO entre passos. Sem "Quase lá…" (mentia
+// sobre o progresso) nem "Ainda a pensar…" repetido em loop. Só um sinal sereno
+// de que o trabalho continua — a atividade REAL (criar ficheiros, gerar imagens)
+// vem à parte via humanizeToolUse e é essa que conta.
 export const HEARTBEAT_PHRASES = [
-  "Ainda a pensar…",
-  "A explorar a melhor abordagem…",
-  "A analisar o que já existe…",
-  "A juntar as peças…",
-  "A polir os detalhes…",
-  "Quase lá…",
+  "A pensar no próximo passo…",
+  "A escrever o código…",
+  "A ligar as peças…",
+  "A afinar os detalhes…",
 ];

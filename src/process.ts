@@ -360,7 +360,9 @@ Fio condutor: precisão e honestidade acima de velocidade. "Feito, ficou bom" é
       supabase.rpc("increment_user_tokens", { p_user_id: order.user_id, p_amount: runRes.tokensUsed }).then((r) => {
         if (r.error) console.warn(`[${order.id.slice(0, 8)}] quota update falhou: ${r.error.message}`);
       });
-      if (runRes.finalText && iter === 1) await log(order.app_id, order.id, order.user_id, "agente", "texto", runRes.finalText);
+      // (NÃO re-logar runRes.finalText — o agent.ts JÁ faz streaming de TODO o
+      // texto do assistente para o chat, incluindo o resumo final. Logá-lo aqui
+      // outra vez fazia a mensagem "Feito…" aparecer DUPLICADA.)
       } // fim do else — só corre agente se NÃO for revert
 
       // --- (4) Commit + push ---
