@@ -75,6 +75,10 @@ export async function runAgent(input: AgentInput): Promise<AgentRun> {
   let sessionId: string | null = null;
   const mcpToolsFaltantes: string[] = [];
   const toolsUsadas: Array<{ name: string; input: unknown }> = [];
+  // Upgrade 2026-07-06: de-dup de atividades idênticas CONSECUTIVAS. Sem isto o
+  // chat enche-se de "A verificar os tipos" ×40 seguidos. Guarda a última frase
+  // mostrada; se a próxima for igual, não repete (nem a mensagem nem o subpasso).
+  let lastHumano: string | null = null;
 
   // C3.3: instrumentação do hang — sabemos SEMPRE qual foi o último evento e
   // que tool ficou pendente antes de qualquer silêncio.
@@ -194,9 +198,18 @@ export async function runAgent(input: AgentInput): Promise<AgentRun> {
       // que acontece (a sensação Claude Code), não só um resumo a posteriori.
       for (const c of content) {
         if (c.type === "text" && c.text && c.text.trim().length > 2 && input.appId && input.userId) {
+          const txt = c.text.trim();
+          // Filtro de FUGA DO PLANO-DE-FERRAMENTA: o agente às vezes narra o seu
+          // ambiente interno ("o modo de plano desta ferramenta não está operacional
+          // neste ambiente Studio…"). Isso é encanamento — não interessa ao 0-coder e
+          // parece um erro. Não o mostramos (o runlog do admin fica com tudo).
+          if (/modo de plano|plan mode|não está operacional|nao esta operacional|ambiente Studio|esta ferramenta|worktree|session_id|sandbox|permissionMode/i.test(txt)) {
+            runlog(input.orderId, "info", `texto interno filtrado do chat: ${txt.slice(0, 80)}`).catch(() => {});
+            continue;
+          }
           supabase.from("studio_messages").insert({
             app_id: input.appId, order_id: input.orderId, user_id: input.userId,
-            autor: "agente", tipo: "texto", conteudo: { text: c.text.trim() },
+            autor: "agente", tipo: "texto", conteudo: { text: txt },
           }).then((r) => { if (r.error) console.warn(`msg texto stream falhou: ${r.error.message}`); });
         }
       }
@@ -213,7 +226,8 @@ export async function runAgent(input: AgentInput): Promise<AgentRun> {
           // Fatia C: adiciona também sub-passo ao plano.p2 (hierárquico).
           if (input.appId && input.userId) {
             const humano = humanizeToolUse(c.name, c.input ?? {});
-            if (humano) {
+            if (humano && humano !== lastHumano) {
+              lastHumano = humano;
               supabase.from("studio_messages").insert({
                 app_id: input.appId, order_id: input.orderId, user_id: input.userId,
                 autor: "agente", tipo: "atividade", conteudo: { text: humano },
