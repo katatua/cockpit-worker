@@ -192,6 +192,16 @@ export async function processOrder(order: OrderRow): Promise<void> {
         readFile(path.join(worktree, "SPEC.md"), "utf8").catch(() => ""),
       ]);
 
+      // Memória GLOBAL (cross-app / cross-agent): playbook de lições transversais
+      // que valem para TODAS as apps e agentes — para o agente não re-diagnosticar
+      // a mesma classe de bug em apps diferentes (foi o que aconteceu com as imagens).
+      const { data: playbook } = await supabase.from("agent_playbook")
+        .select("regra").eq("ativo", true).in("scope", ["global", "studio"]).order("created_at");
+      const regrasGlobais = (playbook ?? []).map((p) => (p as { regra: string }).regra);
+      const playbookBlock = regrasGlobais.length > 0
+        ? `--- PLAYBOOK GLOBAL (lições transversais — valem para TODAS as apps; segue-as SEMPRE e NÃO as voltes a diagnosticar) ---\n${regrasGlobais.map((r, i) => `${i + 1}. ${r}`).join("\n")}`
+        : "";
+
       // F2 · memória por app: lições de ordens anteriores
       const { data: appMem } = await supabase.from("studio_apps").select("aprendizagens").eq("id", app.id).single();
       const licoes = (appMem?.aprendizagens as string[] | null) ?? [];
@@ -233,6 +243,7 @@ L6 VERIFICA CONTRA CRITÉRIO EXPLÍCITO E REPORTA O FACTO MEDIDO: onde o pedido 
 L7 ÂMBITO CIRÚRGICO: corrige o que foi pedido; problema adjacente SINALIZA-SE no relato final como pergunta ("queres que trate disto no próximo turno?") — nunca alastres sozinho nem finjas que não viste.
 L9 REBUILD SÓ COM "SUBSTITUI" HUMANO EXPLÍCITO: regenerar de raiz como fuga a um gate vermelho é PROIBIDO.
 Fio condutor: precisão e honestidade acima de velocidade. "Feito, ficou bom" é reprovado; "Substituí X por Y (22×4px), confirmei Z, notei W — trato?" é aprovado.`,
+        playbookBlock,
         memoriaBlock,
         agentsMd && `--- AGENTS.md ---\n${agentsMd}`,
         specMd && `--- SPEC.md ---\n${specMd}`,
@@ -373,6 +384,44 @@ Fio condutor: precisão e honestidade acima de velocidade. "Feito, ficou bom" é
       plano = step(plano, "p3", "feito");
       await supabase.from("studio_orders").update({ plano, commit_sha: sha, diff_resumo: stat }).eq("id", order.id);
       await event(order.app_id, order.id, order.user_id, "worker.commit", { sha, branch, stat, iter });
+
+      // --- (4b) PRÉ-GATE LOCAL (poupa deploys — item de velocidade 2026-07-06) ---
+      // Corre o link-check contra o DEV SERVER LOCAL (grátis, ~segundos) ANTES de
+      // esperar pelo deploy do Vercel (até 6 min). Se falha aqui, NÃO esperamos o
+      // deploy — vamos já corrigir (a maior fatia do tempo em loops era o deploy
+      // por iteração falhada). O gate AUTORITATIVO (quality+smoke+aceitação no
+      // DEPLOY) mantém-se intacto quando o pré-gate passa → sem falso-positivo,
+      // sem regressão. Fallback honesto: se o dev server não arrancar em 20s,
+      // salta o pré-gate e segue o caminho normal. Kill-switch: STUDIO_PREGATE_LOCAL=0.
+      if (process.env.STUDIO_PREGATE_LOCAL !== "0" && app.slug) {
+        let qLocal: import("./quality.js").QualityReport | null = null;
+        try {
+          const rotasLocal = await discoverRoutes(worktree).catch(() => ["/"]);
+          const prev = await Promise.race([
+            ensurePreview(app.slug, branch, worktree),
+            new Promise<null>((res) => setTimeout(() => res(null), 20_000)),
+          ]);
+          if (prev && prev.ready) {
+            qLocal = await checkQuality(`http://127.0.0.1:${prev.port}`, rotasLocal).catch(() => null);
+          } else {
+            await runlog(order.id, "stderr", "pré-gate local saltado (dev server não pronto em 20s) — segue por deploy");
+          }
+        } catch (e) {
+          await runlog(order.id, "stderr", `pré-gate local saltado: ${e instanceof Error ? e.message.slice(0, 100) : String(e)}`);
+        }
+        if (qLocal && !qLocal.ok) {
+          await runlog(order.id, "info", `pré-gate LOCAL falhou (${qLocal.falhas.length}) — salto o deploy, corrijo já`);
+          lastError = `${qLocal.falhas.length} problemas: ${qLocal.falhas.slice(0, 3).map((f) => `${f.url} — ${f.motivo}`).join("; ")}`;
+          lastDetalhe = JSON.stringify({ falhasQuality: qLocal.falhas }, null, 1); // C6.9
+          await log(order.app_id, order.id, order.user_id, "agente", "erro_humano",
+            qLocal.falhas.length === 1 ? "Um link não está a funcionar. Vou corrigir." : `${qLocal.falhas.length} coisas não funcionam. Vou corrigir.`);
+          const nx = await nextEstrategia(order.id, lastError);
+          currentEstrategia = nx.estrategia;
+          if (nx.esgotada) throw new Error(esgotadaHumana(lastError));
+          continue;
+        }
+        if (qLocal) await runlog(order.id, "info", "pré-gate LOCAL OK — avanço para o deploy");
+      }
 
       // --- (5) Vercel deploy + (6b-paralelo) smoke LOCAL na branch ---
       // C5.2: o poll do deploy corre EM PARALELO com o smoke no dev server
