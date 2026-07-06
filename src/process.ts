@@ -31,7 +31,11 @@ import { scheduleNextRound } from "./campaign-sweep.js";
 import { startHeartbeat } from "./heartbeat.js";
 import { gerarResumo } from "./resumo.js";
 
-const MAX_ITER = 8; // safety net anti-runaway
+const MAX_ITER = 8; // safety net anti-runaway (contagem)
+// Orçamento de TEMPO (2026-07-06): um site não pode arrastar-se 30 min. Se o
+// passamos, paramos com hand-off honesto em vez de continuar a queimar deploys
+// em loops. O grosso do tempo perdido eram deploys repetidos por iteração.
+const BUDGET_MS = Number(process.env.STUDIO_BUDGET_MS ?? "720000"); // 12 min (ceiling)
 
 const PASSOS = [
   "A preparar um espaço de trabalho seguro",
@@ -110,6 +114,14 @@ export async function processOrder(order: OrderRow): Promise<void> {
     for (let iter = 1; iter <= MAX_ITER; iter++) {
       await runlog(order.id, "info", `iteração ${iter}/${MAX_ITER} · estratégia=${currentEstrategia}`);
 
+      // Orçamento de tempo: entre iterações, se já passámos do ceiling, paramos
+      // com hand-off honesto (não começa mais uma iteração + deploy). Bounds o
+      // runaway de 30min visto quando o agente entra em loop.
+      if (iter > 1 && Date.now() - t0 > BUDGET_MS) {
+        await runlog(order.id, "stderr", `orçamento de tempo esgotado (${Math.round((Date.now() - t0) / 60000)}min) — hand-off honesto`);
+        throw new Error(esgotadaHumana(lastError ?? "a construção demorou mais do que o orçamento de tempo"));
+      }
+
       // --- (1) Worktree (novo em cada iteração de reescrever_do_zero) ---
       const forceFresh = currentEstrategia === "reescrever_do_zero" || iter === 1;
       let worktree: string;
@@ -158,9 +170,12 @@ export async function processOrder(order: OrderRow): Promise<void> {
               // (Dockerfile), o que faria o npm SALTAR as devDependencies — e o
               // Tailwind + TypeScript + @types vivem lá. Sem isto, `next build`
               // falhava (Tailwind/tsc em falta) e o agente lutava com o build.
+              // --cache no volume persistente /data: a 1.ª ordem de uma app baixa
+              // os pacotes; as seguintes (e após restarts) instalam do cache =
+              // muito mais rápido. Worktree fica efémero em /tmp, cache persiste.
               await spawnPromise("npm",
-                hasLock ? ["ci", "--no-audit", "--no-fund", "--prefer-offline", "--include=dev"]
-                        : ["install", "--no-audit", "--no-fund", "--include=dev"],
+                hasLock ? ["ci", "--no-audit", "--no-fund", "--prefer-offline", "--include=dev", "--cache", "/data/npm-cache"]
+                        : ["install", "--no-audit", "--no-fund", "--prefer-offline", "--include=dev", "--cache", "/data/npm-cache"],
                 { cwd: worktree });
               await runlog(order.id, "info", `npm install OK (com devDependencies)`);
             } catch (e) {

@@ -27,7 +27,7 @@ const ORDEM_ESTRATEGIAS: Estrategia[] = [
   "simplificar",
   "sem_feature_secundaria",
 ];
-const MAX_TENTATIVAS_MESMO_ERRO = 3;
+const MAX_TENTATIVAS_MESMO_ERRO = 2; // 2026-07-06: 3→2, escala de estratégia mais cedo (menos tempo a martelar o mesmo erro + deploys repetidos)
 
 type EstrategiaLog = {
   hash: string;        // hash da erro-signature
