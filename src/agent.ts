@@ -12,10 +12,22 @@
  *   - Brief §1: SEM teto de tokens. Se explodir, kill-switch do dono.
  *   - Runlog: cada chamada de tool → linha stream=tool (ou stream=mcp para BAI).
  */
+import path from "node:path";
 import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { CONFIG } from "./config.js";
 import { runlog, supabase } from "./db.js";
 import { humanizeToolUse } from "./humanize.js";
+
+// GUARD de isolamento: um caminho está DENTRO do cwd da ordem? Relativos resolvem
+// contra o cwd; absolutos têm de cair debaixo dele. Impede o agente de sair para
+// /data/apps/* (outras apps) ou /home/user/app (alucinação) — visto em produção:
+// agente perdeu o cwd, foi editar outra app e o build pendurou.
+function insideCwd(p: string, cwd: string): boolean {
+  if (!p) return true;
+  const abs = path.isAbsolute(p) ? path.resolve(p) : path.resolve(cwd, p);
+  const root = path.resolve(cwd);
+  return abs === root || abs.startsWith(root + path.sep);
+}
 
 export type AgentRun = {
   finalText: string;
@@ -116,9 +128,27 @@ export async function runAgent(input: AgentInput): Promise<AgentRun> {
   // permissão interativa que nunca chegava em headless.)
   const canUseTool = async (toolName: string, toolInput: Record<string, unknown>) => {
     const permitida = allowedToolsBase.includes(toolName) || toolName.startsWith("mcp__bai__");
-    if (permitida) return { behavior: "allow" as const, updatedInput: toolInput };
-    if (input.orderId) runlog(input.orderId, "stderr", `tool NEGADA (fora da whitelist): ${toolName}`).catch(() => {});
-    return { behavior: "deny" as const, message: `A tool ${toolName} não está disponível neste ambiente — usa as tools permitidas (${allowedToolsBase.join(", ")}).` };
+    if (!permitida) {
+      if (input.orderId) runlog(input.orderId, "stderr", `tool NEGADA (fora da whitelist): ${toolName}`).catch(() => {});
+      return { behavior: "deny" as const, message: `A tool ${toolName} não está disponível neste ambiente — usa as tools permitidas (${allowedToolsBase.join(", ")}).` };
+    }
+    // GUARD de ISOLAMENTO (2026-07-06): nenhuma tool pode tocar em ficheiros FORA
+    // do cwd da ordem. Impede o agente de editar/ler outra app em /data/apps/* ou
+    // alucinar /home/user/app. Não pode causar falso-negativo no build — só barra
+    // acesso fora do worktree, que é SEMPRE um erro.
+    const pathParam = (toolInput.file_path ?? toolInput.path) as string | undefined;
+    if (pathParam && !insideCwd(pathParam, input.cwd)) {
+      if (input.orderId) runlog(input.orderId, "stderr", `${toolName} NEGADA · caminho fora do worktree: ${pathParam}`).catch(() => {});
+      return { behavior: "deny" as const, message: `Caminho FORA do teu diretório de trabalho. A app está no teu cwd (${input.cwd}) — usa caminhos RELATIVOS (ex.: "app/page.tsx"). /data/apps/* e /home/* são de OUTRAS apps; nunca lá toques. Corre "ls" no cwd para ver a estrutura real.` };
+    }
+    if (toolName === "Bash") {
+      const cmd = String(toolInput.command ?? "");
+      if (/\/data\/apps|find\s+\/(?!tmp\/studio)/.test(cmd)) {
+        if (input.orderId) runlog(input.orderId, "stderr", `Bash NEGADO (fora do worktree): ${cmd.slice(0, 90)}`).catch(() => {});
+        return { behavior: "deny" as const, message: `Comando bloqueado: não acedas a /data/apps (outras apps) nem faças "find /" na raiz. Trabalha SÓ no teu cwd (${input.cwd}) com caminhos relativos; usa "ls" para ver a estrutura.` };
+      }
+    }
+    return { behavior: "allow" as const, updatedInput: toolInput };
   };
 
   // DEADLOCK FIX: o abortController.abort() mata o child process (SIGINT visto
