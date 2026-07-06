@@ -316,10 +316,17 @@ Fio condutor: precisão e honestidade acima de velocidade. "Feito, ficou bom" é
       let runRes: Awaited<ReturnType<typeof runAgent>>;
       let salvaged = false;
       const tAgent0 = Date.now(); // C5.3 telemetria: fase execução
-      // Economia: Sonnet por defeito; escalação para Fable quando o
-      // loop-detector mudou de estratégia (o caso provou-se difícil).
-      const modeloIter = currentEstrategia === "padrao" ? CONFIG.WORKER_MODEL : CONFIG.WORKER_MODEL_ESCALATION;
-      await runlog(order.id, "info", `modelo=${modeloIter}`);
+      // Economia 3-tier: EDIÇÃO SIMPLES → Haiku (~5× mais barato); build/complexo
+      // → Sonnet; caso difícil (loop-detector mudou de estratégia) → Fable.
+      // "Edição simples" = iter 1, estratégia padrão, SEM especificação de features
+      // (o interpret só põe "O que vou incluir:" em builds) e pedido curto. Se o
+      // Haiku falhar o gate, a estratégia muda e escala (rede de segurança).
+      const temSpec = (intencaoAprovada ?? "").includes("O que vou incluir:");
+      const edicaoSimples = CONFIG.HAIKU_EDITS && iter === 1 && currentEstrategia === "padrao"
+        && !temSpec && (order.texto?.length ?? 0) < 220;
+      const modeloBase = edicaoSimples ? CONFIG.WORKER_MODEL_SIMPLE : CONFIG.WORKER_MODEL;
+      const modeloIter = currentEstrategia === "padrao" ? modeloBase : CONFIG.WORKER_MODEL_ESCALATION;
+      await runlog(order.id, "info", `modelo=${modeloIter}${edicaoSimples ? " (edição simples → económico)" : ""}`);
       try {
         runRes = await runAgent({
           cwd: worktree,

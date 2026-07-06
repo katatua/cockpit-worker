@@ -45,4 +45,10 @@ export const CONFIG = {
   // quando o loop-detector muda de estratégia (caso difícil), escala p/ Fable.
   WORKER_MODEL: process.env.WORKER_MODEL ?? "claude-sonnet-5",
   WORKER_MODEL_ESCALATION: process.env.WORKER_MODEL_ESCALATION ?? "claude-fable-5",
+  // Economia (2026-07-06, decisão do dono): EDIÇÕES SIMPLES (ordem sem
+  // especificação de features, iter 1) correm em Haiku (~5x mais barato que
+  // Sonnet). Se a edição falhar o gate, o loop-detector escala (→ Fable) — rede
+  // de segurança. Kill-switch: WORKER_HAIKU_EDITS=0.
+  WORKER_MODEL_SIMPLE: process.env.WORKER_MODEL_SIMPLE ?? "claude-haiku-4-5",
+  HAIKU_EDITS: process.env.WORKER_HAIKU_EDITS !== "0",
 };
