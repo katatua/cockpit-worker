@@ -37,14 +37,15 @@ primary_region = 'cdg'
 # + dev server + chromium em 1GB (máquina 22min em thrashing, ordens órfãs).
 # 2GB + swap de 1GB absorve os picos de npm/next build; MAX_CONCURRENT no
 # index.ts desceu 3→2 pelo mesmo motivo.
-swap_size_mb = 1024
+swap_size_mb = 2048
 
-# 2026-07-03 (2ª lição de capacidade): com 2 agentes em paralelo num único
-# vCPU partilhado, o chromium do smoke nem carrega uma página em 45s e o
-# idle-watchdog mata agentes saudáveis. 2 vCPU = 1 por agente concorrente.
+# 2026-07-06: escalada 2→4 vCPU / 2→4GB / swap 1→2GB. Provado (ps) que 2 ordens
+# concorrentes (2× next build ~1GB + Chromium do smoke) saturavam 2 vCPU/2GB e
+# penduravam os builds ~10min. Com 4 vCPU/4GB+swap cabem 2 ordens (2 vCPU + ~2GB
+# cada) sem thrash → STUDIO_MAX_CONCURRENT volta a 2, mais rápido por ordem.
 [[vm]]
-  size = 'shared-cpu-2x'
-  memory = '2gb'
+  size = 'shared-cpu-4x'
+  memory = '4gb'
   cpu_kind = 'shared'
-  cpus = 2
-  memory_mb = 2048
+  cpus = 4
+  memory_mb = 4096
