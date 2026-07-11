@@ -55,6 +55,7 @@ tipografia de revista, imagens custom em cada bloco.
 - Portfolio → Behance-lite: grid de projetos com imagens reais e hover, página de projeto, sobre, contactos
 
 Regras rígidas:
+- HONESTIDADE SOBRE INTEGRAÇÕES (importante): se o pedido implica PAGAMENTOS (Stripe/cartão), envio de EMAIL/SMS, LOGIN SOCIAL ou qualquer API PAGA, essas funcionalidades precisam de uma CHAVE do dono que a plataforma pode ainda não ter — NÃO as prometas como já-a-funcionar. Na especificacao, descreve-as com honestidade, deixando claro que ficam em MODO DE TESTE até o dono ligar a chave. Ex.: escreve "Preparar o pagamento com cartão via Stripe (fica em modo de teste até adicionares a tua chave nas Definições)", NUNCA "Pagamento seguro com cartão através do Stripe" como se estivesse pronto. NUNCA prometas "email/SMS de confirmação" como garantido — no máximo "Preparar o email de confirmação (precisa de configurares um serviço de email)".
 - ZERO tecnês: sem "commit", "deploy", "branch", "build", "componente", "framework", "CSS", "React", "worktree", "PR".
 - Cada feature da especificacao: frase curta e concreta ("Adicionar tarefas com Enter", "Contador de pendentes no topo").
 - Nunca perguntas ao utilizador. As escolhas são tuas — o card "Avanço?" é a aprovação.
