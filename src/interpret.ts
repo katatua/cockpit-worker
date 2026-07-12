@@ -24,6 +24,7 @@ export type InterpretResult = {
   especificacao?: string[];   // features propostas (benchmark de mercado)
   resposta?: string;          // se conversa, a resposta direta
   nomeAppSugerido?: string;   // se app_nova
+  tier: "simples" | "profundo"; // profundo = pipeline multi-agente (deep-build)
   tokensUsed: number;
 };
 
@@ -41,6 +42,15 @@ O utilizador escreve como fala — pode ser vago ou incompleto. A tua função �
      propõe 5-10 features concretas baseadas nos BENCHMARKS DO MERCADO —
      o que os líderes desse segmento oferecem como básico.
      SE o pedido já é específico (ex: "muda o título para X"), omite.
+
+3. "tier" — classifica a COMPLEXIDADE do trabalho:
+   - "simples": edições, features isoladas, sites de conteúdo/marca, apps de 1
+     ecrã ou CRUD leve com localStorage. A esmagadora maioria dos pedidos.
+   - "profundo": APENAS quando o pedido implica um SISTEMA com vários subsistemas
+     que se coordenam — ex.: clone de um produto real com backend (base de dados
+     + autenticação + várias APIs + vários fluxos), "uma app tão complexa como
+     X", vários papéis de utilizador, motor/pipeline, integrações múltiplas. Na
+     dúvida entre os dois, escolhe "simples". Uma conversa é sempre "simples".
 
 Benchmarks de referência (usa o que souberes do mercado). Para sites de
 CONTEÚDO/MARCA (não apps de dados), a régua é editorial premium — como o
@@ -67,7 +77,7 @@ Exemplos:
 - "um site de férias" → { "kind": "trabalho", "intencao": "Vou criar um site de férias premium, com imagens cinematográficas e design de revista.", "especificacao": ["Hero de ecrã inteiro com imagem cinematográfica e uma frase de impacto", "Galeria de destinos com fotos reais (Santorini, Costa Amalfitana, Provença…)", "Propriedade em destaque com galeria, detalhes e cartão de reserva", "Secção de experiências curadas com imagens", "Depoimentos de hóspedes", "Rodapé com newsletter, contactos e redes sociais", "Paleta serena e tipografia editorial", "Transições subtis ao fazer scroll"] }
 - "quantas apps posso ter?" → { "kind": "conversa", "resposta": "Podes ter até 5 apps no plano Free e 20 no Pro." }
 
-Responde SÓ com JSON válido: { "kind": ..., "intencao"?: ..., "especificacao"?: [...], "resposta"?: ..., "nomeAppSugerido"?: ... }. Sem markdown fence.`;
+Responde SÓ com JSON válido: { "kind": ..., "tier": "simples"|"profundo", "intencao"?: ..., "especificacao"?: [...], "resposta"?: ..., "nomeAppSugerido"?: ... }. Sem markdown fence.`;
 
 export async function interpret(texto: string, apiKey: string): Promise<InterpretResult> {
   const body = {
@@ -95,7 +105,7 @@ export async function interpret(texto: string, apiKey: string): Promise<Interpre
     .replace(/^```(?:json)?\s*\n?/i, "")
     .replace(/\n?```\s*$/i, "")
     .trim();
-  let parsed: { kind: string; intencao?: string; especificacao?: string[]; resposta?: string; nomeAppSugerido?: string };
+  let parsed: { kind: string; tier?: string; intencao?: string; especificacao?: string[]; resposta?: string; nomeAppSugerido?: string };
   try { parsed = JSON.parse(stripped); } catch {
     parsed = { kind: "trabalho", intencao: rawText.split("\n")[0].slice(0, 200) };
   }
@@ -103,6 +113,7 @@ export async function interpret(texto: string, apiKey: string): Promise<Interpre
     : parsed.kind === "app_nova" ? "app_nova"
     : "trabalho";
   const intencao = parsed.intencao ?? (kind !== "conversa" ? `Vou tratar de: ${texto.slice(0, 80)}.` : "");
+  const tier: "simples" | "profundo" = parsed.tier === "profundo" && kind !== "conversa" ? "profundo" : "simples";
   return {
     kind,
     intencao,
@@ -111,6 +122,7 @@ export async function interpret(texto: string, apiKey: string): Promise<Interpre
       : undefined,
     resposta: parsed.resposta,
     nomeAppSugerido: parsed.nomeAppSugerido,
+    tier,
     tokensUsed: (j.usage.input_tokens ?? 0) + (j.usage.output_tokens ?? 0),
   };
 }

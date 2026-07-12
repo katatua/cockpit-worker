@@ -51,4 +51,18 @@ export const CONFIG = {
   // de segurança. Kill-switch: WORKER_HAIKU_EDITS=0.
   WORKER_MODEL_SIMPLE: process.env.WORKER_MODEL_SIMPLE ?? "claude-haiku-4-5",
   HAIKU_EDITS: process.env.WORKER_HAIKU_EDITS !== "0",
+
+  // --- TIER PROFUNDO (2026-07-12) · réplica-do-Claude-Code ---
+  // Disciplina de modelos (decisão do dono): Opus para raciocínio pesado
+  // (arquitetura/decomposição + verificação/diagnóstico de bugs), Sonnet para
+  // implementação mecânica, Haiku para trivial (mapa do repo, classificação).
+  WORKER_MODEL_ARCHITECT: process.env.WORKER_MODEL_ARCHITECT ?? "claude-opus-4-8",
+  WORKER_MODEL_IMPLEMENT: process.env.WORKER_MODEL_IMPLEMENT ?? "claude-sonnet-5",
+  WORKER_MODEL_VERIFY: process.env.WORKER_MODEL_VERIFY ?? "claude-opus-4-8",
+  WORKER_MODEL_CHEAP: process.env.WORKER_MODEL_CHEAP ?? "claude-haiku-4-5",
+  // Orçamento do tier profundo: TEMPO largo (horas) em vez de teto de iterações.
+  // Budget não é travão (decisão do dono) — isto é só a rede anti-runaway.
+  DEEP_BUDGET_MS: Number(process.env.STUDIO_DEEP_BUDGET_MS ?? String(4 * 60 * 60 * 1000)), // 4h
+  DEEP_MAX_MILESTONES: Number(process.env.STUDIO_DEEP_MAX_MILESTONES ?? "24"),
+  DEEP_MAX_FIX_ROUNDS: Number(process.env.STUDIO_DEEP_MAX_FIX_ROUNDS ?? "4"), // loop implement↔verify por milestone
 };

@@ -5,7 +5,7 @@
  * Uma ordem de cada vez (o lock por app fica atrás).
  * Graceful shutdown em SIGTERM (Fly manda quando reinicia a máquina).
  */
-import { supabase, log, event, type OrderRow } from "./db.js";
+import { supabase, log, event, runlog, type OrderRow } from "./db.js";
 import { processOrder } from "./process.js";
 import { CONFIG } from "./config.js";
 import { startRouter } from "./preview-router.js";
@@ -74,9 +74,10 @@ async function interpretRascunho(order: OrderRow): Promise<void> {
       ? `${result.intencao}\n\nO que vou incluir:\n${result.especificacao.map((f) => `• ${f}`).join("\n")}`
       : result.intencao;
     const upd = await supabase.from("studio_orders").update({
-      estado: "aguarda_confirmacao", intencao: intencaoCompleta, tokens_usados: result.tokensUsed,
+      estado: "aguarda_confirmacao", intencao: intencaoCompleta, tier: result.tier, tokens_usados: result.tokensUsed,
     }).eq("id", order.id);
     if (upd.error) throw upd.error;
+    if (result.tier === "profundo") await runlog(order.id, "info", "tier=profundo → pipeline multi-agente (deep-build)");
     await supabase.from("studio_messages").insert({
       app_id: order.app_id, order_id: order.id, user_id: order.user_id,
       autor: "agente", tipo: "confirmacao",

@@ -19,6 +19,7 @@ import { supabase, tryLock, unlock, log, event, runlog, resetRunlogSeq, type Ord
 import { CONFIG } from "./config.js";
 import { cleanWorktree, shallowClone, createBranch, hasChanges, commitAll, push, diffStat } from "./git.js";
 import { runAgent } from "./agent.js";
+import { runDeepBuild } from "./deep-build.js";
 import { STUDIO_IMAGE_SCRIPT } from "./image-script.js";
 import { gerarAceitacao, validarAceitacao } from "./aceitacao.js";
 import { stop as stopPreview } from "./preview-manager.js";
@@ -61,7 +62,12 @@ function step(plano: Plano, id: string, estado: Plano["passos"][number]["estado"
 
 export async function processOrder(order: OrderRow): Promise<void> {
   const t0 = Date.now();
-  console.log(`[${order.id.slice(0, 8)}] a processar (worker=${CONFIG.WORKER_ID})`);
+  // TIER PROFUNDO (2026-07-12): ordens complexas correm o pipeline multi-agente
+  // (deep-build) no iter 1, sem o teto de 12min. Retries de gate continuam a ser
+  // fixes cirúrgicos de 1 agente (mais baratos, focados no problema concreto).
+  const isDeep = order.tier === "profundo" && order.modo === "build";
+  const budgetCeiling = isDeep ? CONFIG.DEEP_BUDGET_MS : BUDGET_MS;
+  console.log(`[${order.id.slice(0, 8)}] a processar (worker=${CONFIG.WORKER_ID})${isDeep ? " · TIER PROFUNDO" : ""}`);
 
   const { data: app } = await supabase.from("studio_apps").select("*").eq("id", order.app_id).single<AppRow>();
   if (!app) return failEarly(order, "app não existe");
@@ -117,7 +123,7 @@ export async function processOrder(order: OrderRow): Promise<void> {
       // Orçamento de tempo: entre iterações, se já passámos do ceiling, paramos
       // com hand-off honesto (não começa mais uma iteração + deploy). Bounds o
       // runaway de 30min visto quando o agente entra em loop.
-      if (iter > 1 && Date.now() - t0 > BUDGET_MS) {
+      if (iter > 1 && Date.now() - t0 > budgetCeiling) {
         await runlog(order.id, "stderr", `orçamento de tempo esgotado (${Math.round((Date.now() - t0) / 60000)}min) — hand-off honesto`);
         throw new Error(esgotadaHumana(lastError ?? "a construção demorou mais do que o orçamento de tempo"));
       }
@@ -342,17 +348,26 @@ Fio condutor: precisão e honestidade acima de velocidade. "Feito, ficou bom" é
       const modeloIter = currentEstrategia === "padrao" ? modeloBase : CONFIG.WORKER_MODEL_ESCALATION;
       await runlog(order.id, "info", `modelo=${modeloIter}${edicaoSimples ? " (edição simples → económico)" : ""}`);
       try {
-        runRes = await runAgent({
-          cwd: worktree,
-          systemPrompt,
-          userPrompt,
-          mode: order.modo,
-          resumeSessionId: sessionId,
-          orderId: order.id,
-          appId: order.app_id,
-          userId: order.user_id,
-          model: modeloIter,
-        });
+        runRes = (isDeep && iter === 1)
+          ? await runDeepBuild({
+              cwd: worktree,
+              objetivo: `${order.texto}${spec}`,
+              baseSystemPrompt: systemPrompt,
+              orderId: order.id,
+              appId: order.app_id,
+              userId: order.user_id,
+            })
+          : await runAgent({
+              cwd: worktree,
+              systemPrompt,
+              userPrompt,
+              mode: order.modo,
+              resumeSessionId: sessionId,
+              orderId: order.id,
+              appId: order.app_id,
+              userId: order.user_id,
+              model: modeloIter,
+            });
       } catch (agentErr) {
         const msg = agentErr instanceof Error ? agentErr.message : String(agentErr);
         const isTimeout = /demorou muito|aborted/i.test(msg);

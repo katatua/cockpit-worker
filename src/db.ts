@@ -19,6 +19,7 @@ export type OrderRow = {
   estado: string;
   session_id: string | null;
   tokens_usados: number;
+  tier?: "simples" | "profundo"; // tier profundo = pipeline multi-agente (deep-build)
 };
 
 export type AppRow = {
