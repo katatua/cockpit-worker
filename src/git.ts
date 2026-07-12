@@ -54,8 +54,22 @@ export async function cleanWorktree(orderId: string): Promise<string> {
   return dir;
 }
 
-export async function shallowClone(fullName: string, dir: string): Promise<void> {
-  await run("git", ["clone", "--depth", "1", authedRepoUrl(fullName), dir]);
+export async function shallowClone(fullName: string, dir: string, baseBranch?: string): Promise<void> {
+  const url = authedRepoUrl(fullName);
+  // CONTINUIDADE (2026-07-12): se houver uma branch base (o preview mais recente
+  // da app), clona ESSA — assim a ordem constrói SOBRE a última versão que o
+  // utilizador viu, não a partir de main (que só tem o scaffold até publicar).
+  // Se a branch base já não existir no remoto (apagada), cai para o default.
+  if (baseBranch) {
+    try {
+      await run("git", ["clone", "--depth", "1", "--branch", baseBranch, url, dir]);
+      return;
+    } catch {
+      await rm(dir, { recursive: true, force: true });
+      await mkdir(dir, { recursive: true });
+    }
+  }
+  await run("git", ["clone", "--depth", "1", url, dir]);
 }
 
 export async function createBranch(dir: string, branch: string): Promise<void> {

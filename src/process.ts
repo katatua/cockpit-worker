@@ -130,9 +130,18 @@ export async function processOrder(order: OrderRow): Promise<void> {
         plano = step(plano, "p1", "em_execucao"); await supabase.from("studio_orders").update({ plano }).eq("id", order.id);
         if (iter === 1) await log(order.app_id, order.id, order.user_id, "agente", "atividade", "A abrir o teu projeto…");
         else await log(order.app_id, order.id, order.user_id, "agente", "atividade", "A começar do princípio com outra abordagem…");
-        await runlog(order.id, "info", `clone ${app.github_repo}`);
+        // CONTINUIDADE (2026-07-12): construir SOBRE a última versão que o utilizador
+        // viu (o preview mais recente desta app), não a partir de main — main só tem
+        // o scaffold até o utilizador publicar. Sem isto, cada ordem nova reconstruía
+        // a app do ZERO (queixa real: "pedi Stripe e reconstruiu a loja toda").
+        const { data: ultimoPreview } = await supabase.from("studio_orders")
+          .select("branch, created_at").eq("app_id", order.app_id).eq("estado", "preview_pronto")
+          .not("branch", "is", null).neq("id", order.id)
+          .order("created_at", { ascending: false }).limit(1).maybeSingle();
+        const baseBranch = (ultimoPreview as { branch?: string } | null)?.branch ?? undefined;
+        await runlog(order.id, "info", baseBranch ? `clone ${app.github_repo} · a continuar de ${baseBranch}` : `clone ${app.github_repo} · projeto base (main)`);
         worktree = await cleanWorktree(order.id);
-        await shallowClone(app.github_repo, worktree);
+        await shallowClone(app.github_repo, worktree, baseBranch);
         await createBranch(worktree, branch);
         await runlog(order.id, "stdout", `branch criada: ${branch}`);
         // Self-heal: garante o gerador de imagens na versão mais recente (fal.ai+
