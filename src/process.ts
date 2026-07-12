@@ -17,7 +17,7 @@ import path from "node:path";
 import { spawnPromise } from "./spawn-helpers.js";
 import { supabase, tryLock, unlock, log, event, runlog, resetRunlogSeq, type OrderRow, type AppRow, type Plano } from "./db.js";
 import { CONFIG } from "./config.js";
-import { cleanWorktree, shallowClone, createBranch, hasChanges, commitAll, push, diffStat } from "./git.js";
+import { cleanWorktree, shallowClone, createBranch, hasChanges, commitAll, push, diffStat, remoteBranchExists } from "./git.js";
 import { runAgent } from "./agent.js";
 import { runDeepBuild } from "./deep-build.js";
 import { STUDIO_IMAGE_SCRIPT } from "./image-script.js";
@@ -145,10 +145,21 @@ export async function processOrder(order: OrderRow): Promise<void> {
           .not("branch", "is", null).neq("id", order.id)
           .order("created_at", { ascending: false }).limit(1).maybeSingle();
         const baseBranch = (ultimoPreview as { branch?: string } | null)?.branch ?? undefined;
-        await runlog(order.id, "info", baseBranch ? `clone ${app.github_repo} · a continuar de ${baseBranch}` : `clone ${app.github_repo} · projeto base (main)`);
         worktree = await cleanWorktree(order.id);
-        await shallowClone(app.github_repo, worktree, baseBranch);
-        await createBranch(worktree, branch);
+        // RESUME (2026-07-12): se a branch DESTA ordem já existe no remoto, tem
+        // trabalho parcial commitado (deep-build faz commit por milestone) — clona
+        // ESSA e continua, em vez de recomeçar do zero. Só no tier profundo (o
+        // simples não commita a meio, logo não há o que retomar).
+        const podeRetomar = isDeep && await remoteBranchExists(app.github_repo, branch);
+        if (podeRetomar) {
+          await runlog(order.id, "info", `clone ${app.github_repo} · RESUME da branch ${branch} (trabalho parcial commitado)`);
+          await shallowClone(app.github_repo, worktree, branch);
+          // já estamos na branch da ordem — NÃO createBranch (senão duplicava)
+        } else {
+          await runlog(order.id, "info", baseBranch ? `clone ${app.github_repo} · a continuar de ${baseBranch}` : `clone ${app.github_repo} · projeto base (main)`);
+          await shallowClone(app.github_repo, worktree, baseBranch);
+          await createBranch(worktree, branch);
+        }
         await runlog(order.id, "stdout", `branch criada: ${branch}`);
         // Self-heal: garante o gerador de imagens na versão mais recente (fal.ai+
         // Replicate paralelo + escolha de modelo). Apps criadas antes desta versão

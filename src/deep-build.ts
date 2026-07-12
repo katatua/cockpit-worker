@@ -22,6 +22,7 @@ import { CONFIG } from "./config.js";
 import { runAgent } from "./agent.js";
 import { spawnPromise } from "./spawn-helpers.js";
 import { supabase, log, runlog, event } from "./db.js";
+import { commitAll, hasChanges, runCmd } from "./git.js";
 
 export type Milestone = {
   id: string;
@@ -51,6 +52,19 @@ export type DeepBuildResult = {
 
 const PLAN_PATH = ".studio/plan.json";
 const VERIFY_PATH = ".studio/verify.json";
+const PROGRESS_PATH = ".studio/progress.json"; // milestones já feitos (para resume)
+
+// Commit+push do progresso (por milestone) — persiste o trabalho na branch da
+// ordem, para uma interrupção NÃO recomeçar do zero (retoma daqui). Best-effort.
+async function commitPush(cwd: string, orderId: string, msg: string): Promise<void> {
+  try {
+    if (!(await hasChanges(cwd))) return;
+    await commitAll(cwd, msg);
+    await runCmd("git", ["-C", cwd, "push", "--force", "origin", "HEAD"]);
+  } catch (e) {
+    await runlog(orderId, "stderr", `commit incremental falhou (segue na mesma): ${e instanceof Error ? e.message.slice(0, 80) : String(e)}`);
+  }
+}
 
 // REGRA DE COMUNICAÇÃO (2026-07-12) — a mais importante para o utilizador ver.
 // O modo profundo usa papéis "arquiteto/implementador" que tendem a falar como
@@ -148,10 +162,25 @@ export async function runDeepBuild(input: DeepBuildInput): Promise<DeepBuildResu
   };
 
   await mkdir(path.join(cwd, ".studio"), { recursive: true });
-  await runlog(orderId, "info", `deep-build arranque · budget=${Math.round(CONFIG.DEEP_BUDGET_MS / 60000)}min`);
 
   // --- A · mapa do repo ---
   const mapa = await repoMap(cwd);
+
+  // RESUME (2026-07-12): se a branch da ordem foi clonada com um plano já escrito
+  // (.studio/plan.json — o process.ts clona a branch da própria ordem quando ela
+  // já existe), RETOMAMOS em vez de recomeçar do zero. É o fix do "recomeçou do 0".
+  const planoExistente = await readFile(path.join(cwd, PLAN_PATH), "utf8").then((s) => parseJsonLoose<Milestone[]>(s)).catch(() => null);
+  const progresso = await readFile(path.join(cwd, PROGRESS_PATH), "utf8").then((s) => { try { return JSON.parse(s) as { done?: string[] }; } catch { return { done: [] }; } }).catch(() => ({ done: [] as string[] }));
+  const doneIds = new Set<string>(Array.isArray(progresso.done) ? progresso.done : []);
+  const resumindo = !!(planoExistente && Array.isArray(planoExistente) && planoExistente.length > 0);
+
+  let milestones: Milestone[] | null;
+  if (resumindo) {
+    await runlog(orderId, "info", `deep-build RESUME · ${doneIds.size} fase(s) já feitas — continuo, não recomeço`);
+    await log(appId, orderId, userId, "agente", "pensamento", `A retomar de onde fiquei — ${doneIds.size} fase(s) já prontas, não recomeço do zero.`);
+    milestones = planoExistente;
+  } else {
+  await runlog(orderId, "info", `deep-build arranque · budget=${Math.round(CONFIG.DEEP_BUDGET_MS / 60000)}min`);
   await runlog(orderId, "info", `mapa do repo gerado (${mapa.split("\n").length} linhas)`);
 
   // --- B · arquiteto (Opus) ---
@@ -179,12 +208,13 @@ REGRAS: entre 3 e ${CONFIG.DEEP_MAX_MILESTONES} milestones, ordenados por depend
   });
   acc(rArq);
 
-  let milestones = (await readFile(path.join(cwd, PLAN_PATH), "utf8").then((s) => parseJsonLoose<Milestone[]>(s)).catch(() => null)) ?? null;
+  milestones = (await readFile(path.join(cwd, PLAN_PATH), "utf8").then((s) => parseJsonLoose<Milestone[]>(s)).catch(() => null)) ?? null;
   if (!milestones || !Array.isArray(milestones) || milestones.length === 0) {
     // Degrada com honestidade: sem plano estruturado, cai para 1 milestone único.
     await runlog(orderId, "stderr", "arquiteto não produziu plano válido — a degradar para milestone único");
     milestones = [{ id: "m1", titulo: "Construir o objetivo", descricao: objetivo, ficheiros: [], aceitacao: ["A app cumpre o objetivo pedido"] }];
   }
+  } // fim do else (arquiteto fresh)
   // Normaliza — o arquiteto (LLM) pode omitir campos; sem isto um `.map` de
   // aceitacao/ficheiros indefinido rebentava o pipeline inteiro.
   milestones = milestones.slice(0, CONFIG.DEEP_MAX_MILESTONES).map((m, i) => ({
@@ -194,21 +224,27 @@ REGRAS: entre 3 e ${CONFIG.DEEP_MAX_MILESTONES} milestones, ordenados por depend
     ficheiros: Array.isArray(m.ficheiros) ? m.ficheiros : [],
     aceitacao: Array.isArray(m.aceitacao) ? m.aceitacao : [],
   }));
-  await supabase.from("studio_orders").update({ plano_build: milestones }).eq("id", orderId);
-  await event(appId, orderId, userId, "deep.plano", { milestones: milestones.length });
-  await log(appId, orderId, userId, "agente", "texto", `Vou construir isto em ${milestones.length} passos: ${milestones.map((m) => m.titulo).join(" · ")}.`);
+  const planoMs: Milestone[] = milestones ?? [];
+  await supabase.from("studio_orders").update({ plano_build: planoMs }).eq("id", orderId);
+  if (!resumindo) {
+    await event(appId, orderId, userId, "deep.plano", { milestones: planoMs.length });
+    await log(appId, orderId, userId, "agente", "texto", `Vou construir isto em ${planoMs.length} passos: ${planoMs.map((m) => m.titulo).join(" · ")}.`);
+    // Persiste o plano na branch da ordem — o resume depende disto existir no git.
+    await commitPush(cwd, orderId, `deep: plano (${planoMs.length} fases)`);
+  }
 
   // --- C+D · implementar cada milestone, com verificação por milestone ---
-  for (let i = 0; i < milestones.length; i++) {
-    const m = milestones[i];
+  for (let i = 0; i < planoMs.length; i++) {
+    const m = planoMs[i];
+    if (doneIds.has(m.id)) { await runlog(orderId, "info", `milestone ${m.id} já feito — salto (resume)`); continue; }
     if (restante() < 4 * 60 * 1000) {
-      await runlog(orderId, "stderr", `orçamento de tempo quase esgotado — paro no milestone ${i + 1}/${milestones.length} (hand-off honesto)`);
+      await runlog(orderId, "stderr", `orçamento de tempo quase esgotado — paro no milestone ${i + 1}/${planoMs.length} (hand-off honesto)`);
       break;
     }
-    await log(appId, orderId, userId, "agente", "pensamento", `Fase ${i + 1}/${milestones.length}: ${m.titulo}`);
-    await runlog(orderId, "info", `milestone ${m.id} (${i + 1}/${milestones.length}): ${m.titulo}`);
+    await log(appId, orderId, userId, "agente", "pensamento", `Fase ${i + 1}/${planoMs.length}: ${m.titulo}`);
+    await runlog(orderId, "info", `milestone ${m.id} (${i + 1}/${planoMs.length}): ${m.titulo}`);
 
-    const feitos = milestones.slice(0, i).map((x) => `✓ ${x.titulo}`).join("\n") || "(nenhum ainda)";
+    const feitos = planoMs.slice(0, i).map((x) => `✓ ${x.titulo}`).join("\n") || "(nenhum ainda)";
     const implPrompt = [
       baseSystemPrompt,
       COMUNICACAO_UTILIZADOR,
@@ -256,6 +292,11 @@ O "npm run build" falhou depois do milestone "${m.titulo}". Lê o erro REAL abai
       bok = await buildOk(cwd);
     }
     await event(appId, orderId, userId, "deep.milestone", { id: m.id, i: i + 1, buildOk: bok.ok, fixRounds: round });
+    // CHECKPOINT: marca o milestone feito e COMMITA na branch — se algo
+    // interromper a seguir, o resume retoma daqui em vez do zero.
+    doneIds.add(m.id);
+    await writeFile(path.join(cwd, PROGRESS_PATH), JSON.stringify({ done: [...doneIds] }, null, 1));
+    await commitPush(cwd, orderId, `deep: ${m.titulo}`);
     } catch (e) {
       await runlog(orderId, "stderr", `milestone ${m.id} interrompido: ${e instanceof Error ? e.message.slice(0, 100) : String(e)} — continuo para o próximo`);
       await log(appId, orderId, userId, "agente", "atividade", `A fase "${m.titulo}" demorou de mais; sigo em frente e reviso tudo no fim.`);
@@ -285,12 +326,12 @@ Termina com o build verde e ${VERIFY_PATH} escrito.`,
   // --- relatório final honesto ---
   const verify = await readFile(path.join(cwd, VERIFY_PATH), "utf8").then((s) => parseJsonLoose<{ ok: boolean; resumo: string; por_fazer?: string[]; problemas?: string[] }>(s)).catch(() => null);
   const partes: string[] = [];
-  partes.push(`Construí em ${milestones.length} fases: ${milestones.map((m) => m.titulo).join(" · ")}.`);
+  partes.push(`Construí em ${planoMs.length} fases: ${planoMs.map((m) => m.titulo).join(" · ")}.`);
   if (verify?.resumo) partes.push(verify.resumo);
   if (verify?.por_fazer?.length) partes.push(`Para ficares 100% operacional, falta (do teu lado): ${verify.por_fazer.join("; ")}.`);
   if (verify?.problemas?.length) partes.push(`Ficou por resolver (honesto): ${verify.problemas.join("; ")}.`);
   const finalText = partes.join("\n\n");
 
-  await runlog(orderId, "info", `deep-build fim · ${Math.round((Date.now() - t0) / 60000)}min · tokens=${tokens} · milestones=${milestones.length}`);
-  return { finalText, tokensUsed: tokens, sessionId, mcpToolsFaltantes: mcpFaltantes, toolsUsadas: tools, milestones };
+  await runlog(orderId, "info", `deep-build fim · ${Math.round((Date.now() - t0) / 60000)}min · tokens=${tokens} · milestones=${planoMs.length}`);
+  return { finalText, tokensUsed: tokens, sessionId, mcpToolsFaltantes: mcpFaltantes, toolsUsadas: tools, milestones: planoMs };
 }

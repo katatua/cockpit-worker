@@ -76,6 +76,18 @@ export async function createBranch(dir: string, branch: string): Promise<void> {
   await run("git", ["checkout", "-b", branch], { cwd: dir });
 }
 
+/**
+ * RESUME (2026-07-12): a branch desta ordem já existe no remoto? Se sim, tem o
+ * trabalho parcial commitado (deep-build faz commit por milestone) e o clone
+ * deve partir DELA — nunca do zero. Fecha o "recomeçou do 0" após interrupção.
+ */
+export async function remoteBranchExists(fullName: string, branch: string): Promise<boolean> {
+  try {
+    const out = await run("git", ["ls-remote", "--heads", authedRepoUrl(fullName), branch]);
+    return out.trim().length > 0;
+  } catch { return false; }
+}
+
 export async function hasChanges(dir: string): Promise<boolean> {
   const out = await run("git", ["status", "--porcelain"], { cwd: dir });
   return out.trim().length > 0;
