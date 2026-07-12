@@ -175,7 +175,7 @@ REGRAS: entre 3 e ${CONFIG.DEEP_MAX_MILESTONES} milestones, ordenados por depend
 
   const rArq = await runAgent({
     cwd, systemPrompt: arquitetoPrompt, userPrompt: "Desenha a arquitetura e escreve PLAN.md + " + PLAN_PATH + " agora.",
-    mode: "build", orderId, appId, userId, model: CONFIG.WORKER_MODEL_ARCHITECT,
+    mode: "build", orderId, appId, userId, model: CONFIG.WORKER_MODEL_ARCHITECT, idleMs: 600_000,
   });
   acc(rArq);
 
@@ -224,9 +224,14 @@ Quando terminares, corre "npm run build" e confirma que fica verde. Só páras c
       `\n\n${mapa}`,
     ].join("\n\n");
 
+    // RESILIÊNCIA (2026-07-12): um milestone que rebente (ex.: timeout do agente)
+    // NÃO pode matar o pipeline inteiro — antes salvava-se um parcial de 4/12 como
+    // se estivesse pronto. Isola-se cada milestone; o verificador final apanha o
+    // que ficou por fazer.
+    try {
     const rImpl = await runAgent({
       cwd, systemPrompt: implPrompt, userPrompt: `Implementa o milestone ${m.id}: ${m.titulo}.`,
-      mode: "build", orderId, appId, userId, model: CONFIG.WORKER_MODEL_IMPLEMENT,
+      mode: "build", orderId, appId, userId, model: CONFIG.WORKER_MODEL_IMPLEMENT, idleMs: 600_000,
     });
     acc(rImpl);
 
@@ -245,12 +250,16 @@ O "npm run build" falhou depois do milestone "${m.titulo}". Lê o erro REAL abai
       ].join("\n\n");
       const rFix = await runAgent({
         cwd, systemPrompt: fixPrompt, userPrompt: "Corrige o build. Confirma com npm run build.",
-        mode: "build", orderId, appId, userId, model: CONFIG.WORKER_MODEL_VERIFY, // Opus: bug
+        mode: "build", orderId, appId, userId, model: CONFIG.WORKER_MODEL_VERIFY, idleMs: 600_000, // Opus: bug
       });
       acc(rFix);
       bok = await buildOk(cwd);
     }
     await event(appId, orderId, userId, "deep.milestone", { id: m.id, i: i + 1, buildOk: bok.ok, fixRounds: round });
+    } catch (e) {
+      await runlog(orderId, "stderr", `milestone ${m.id} interrompido: ${e instanceof Error ? e.message.slice(0, 100) : String(e)} — continuo para o próximo`);
+      await log(appId, orderId, userId, "agente", "atividade", `A fase "${m.titulo}" demorou de mais; sigo em frente e reviso tudo no fim.`);
+    }
   }
 
   // --- D final · verificador (Opus) sobre o conjunto ---
@@ -268,7 +277,7 @@ Termina com o build verde e ${VERIFY_PATH} escrito.`,
     ].join("\n\n");
     const rVer = await runAgent({
       cwd, systemPrompt: verifyPrompt, userPrompt: "Verifica, corrige o que faltar, e escreve " + VERIFY_PATH + ".",
-      mode: "build", orderId, appId, userId, model: CONFIG.WORKER_MODEL_VERIFY,
+      mode: "build", orderId, appId, userId, model: CONFIG.WORKER_MODEL_VERIFY, idleMs: 600_000,
     });
     acc(rVer);
   }

@@ -47,6 +47,9 @@ export type AgentInput = {
   appId?: string;     // para escrever mensagens atividade
   userId?: string;    // para inserir com user_id preservado
   model?: string;     // LLM desta iteração (economia: Sonnet por defeito, escalação p/ Fable)
+  idleMs?: number;    // tolerância de silêncio SEM tool pendente (default 4min). O
+                      // deep-build passa mais (Opus pensa longamente entre ações e
+                      // era morto a meio de um milestone por "idle_4min").
 };
 
 export async function runAgent(input: AgentInput): Promise<AgentRun> {
@@ -93,7 +96,7 @@ export async function runAgent(input: AgentInput): Promise<AgentRun> {
   // sempre); TOTAL sobe para 45min como guarda de custo (custo é telemetria,
   // não travão — §1); maxTurns limita loops de turnos.
   const AGENT_TOTAL_MS = 45 * 60 * 1000;
-  const AGENT_IDLE_MS = 240_000;
+  const AGENT_IDLE_MS = input.idleMs ?? 240_000;
   const startAt = Date.now();
   let lastMsgAt = Date.now();
   let timedOut = false;
