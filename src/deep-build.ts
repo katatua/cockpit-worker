@@ -89,6 +89,14 @@ const DISCIPLINA_CODIGO = `--- DISCIPLINA DE CÓDIGO (obrigatória neste build) 
 4. SEGURANÇA NAS MIGRAÇÕES: toda a migração de base de dados nasce com RLS/guard ativo — nunca uma tabela sem política de acesso.
 5. RASCUNHO→ATIVO: nada de crítico é "promovido" sem validação; marca o que fica em rascunho.`;
 
+// GOTCHAS conhecidos que já queimaram tempo em builds reais — evita-os À PARTIDA,
+// não os descubras por tentativa-e-erro nos gates.
+const GOTCHAS = `--- ARMADILHAS CONHECIDAS (evita-as desde o início) ---
+1. NUNCA uses window.confirm / window.alert / window.prompt (nem dialogs nativas bloqueantes): o teste automático não consegue passá-las e a ação nunca completa. Usa confirmação em DUAS FASES na própria UI (1º clique arma, 2º confirma), com estado observável (aria-pressed/data-state).
+2. IMAGENS na Vercel: o otimizador /_next/image dá 400 em produção para imagens locais (self-fetch interno). Configura no next.config \`images: { unoptimized: true }\` (as webp geradas já são pequenas e pré-comprimidas) — evita a classe de bug toda. Nunca deixes o default que pede w=3840.
+3. BUILD: corre \`npm run build\` UMA vez, no fim do milestone, para confirmar verde — não após cada edição de documentação (é desperdício).
+4. Controlos interativos (botões/tabs/filtros) expõem SEMPRE o estado à máquina (aria-pressed/aria-selected/data-state) — senão o gate marca-os "não-testáveis".`;
+
 // --- #6 · MAPA DO REPO (determinístico) -----------------------------------
 // Árvore de ficheiros de código + símbolos exportados por ficheiro. Barato e
 // fiável (sem LLM). Dá ao arquiteto/implementador a "forma" do codebase sem
@@ -249,12 +257,16 @@ REGRAS: entre 3 e ${CONFIG.DEEP_MAX_MILESTONES} milestones, ordenados por depend
     }
     await log(appId, orderId, userId, "agente", "pensamento", `Fase ${i + 1}/${planoMs.length}: ${m.titulo}`);
     await runlog(orderId, "info", `milestone ${m.id} (${i + 1}/${planoMs.length}): ${m.titulo}`);
+    // Mapa FRESCO desta fase (estrutura + símbolos já construídos) — evita que o
+    // implementador re-leia a app inteira do zero em cada milestone.
+    const mapaAtual = await repoMap(cwd);
 
     const feitos = planoMs.slice(0, i).map((x) => `✓ ${x.titulo}`).join("\n") || "(nenhum ainda)";
     const implPrompt = [
       baseSystemPrompt,
       COMUNICACAO_UTILIZADOR,
       DISCIPLINA_CODIGO,
+      GOTCHAS,
       `--- O TEU PAPEL: IMPLEMENTADOR ---
 Estás a construir UM milestone de um plano maior, sobre a app que já existe no worktree. Faz SÓ este milestone, completo e com o build verde. Segue as leis de qualidade/honestidade acima (edições cirúrgicas, integrações honestas, imagens reais, multi-página+SEO, etc.). Lê o PLAN.md e ${PLAN_PATH} para o contexto global.
 MILESTONES JÁ FEITOS (não os refaças):\n${feitos}
@@ -263,8 +275,9 @@ Descrição: ${m.descricao}
 Ficheiros prováveis: ${m.ficheiros.join(", ") || "(decide tu)"}
 Critérios de aceitação deste milestone:\n${m.aceitacao.map((a) => `- ${a}`).join("\n")}
 COMUNICA COMO O ARQUITETO (regra importante — não caias em "modo mecânico"): a comunicação NÃO pode empobrecer só porque agora estás a codificar. ANTES de começar, diz numa frase HUMANA o que esta fase traz ao utilizador e a decisão que mais importa nela. À MEDIDA que avanças, narra o RACIOCÍNIO interessante em 1.ª pessoa e linguagem simples (o que estás a construir e porquê, o que ligaste ao quê) — NÃO narres "a ler este ficheiro, a ler aquele"; essa atividade mecânica já é mostrada à parte. O utilizador quer SENTIR o que estás a construir, com a mesma riqueza do plano. Zero tecnês (segue a regra de comunicação acima).
-Quando terminares, corre "npm run build" e confirma que fica verde. Só páras com o build verde.`,
-      `\n\n${mapa}`,
+Quando terminares, corre "npm run build" e confirma que fica verde. Só páras com o build verde.
+USA o MAPA DO REPO abaixo (estrutura + símbolos já construídos nas fases anteriores) para saberes o que já existe — NÃO re-explores a app inteira ficheiro a ficheiro; lê só o que precisas mesmo de alterar.`,
+      `\n\n${mapaAtual}`,
     ].join("\n\n");
 
     // RESILIÊNCIA (2026-07-12): um milestone que rebente (ex.: timeout do agente)
@@ -329,6 +342,7 @@ O "npm run build" falhou depois do milestone "${m.titulo}". Lê o erro REAL abai
       baseSystemPrompt,
       COMUNICACAO_UTILIZADOR,
       DISCIPLINA_CODIGO,
+      GOTCHAS,
       `--- O TEU PAPEL: VERIFICADOR ---
 Todos os milestones foram implementados. A tua função é GARANTIR que o conjunto está correto e coerente (não só que compila). Lê ${PLAN_PATH}, corre "npm run build", corre testes se existirem ("npm test" — se falhar por não haver testes, ignora), e revê o diff geral (git diff --stat) contra a aceitação de CADA milestone.
 Se encontrares algo em falta ou partido, CORRIGE-O agora (tens autonomia total de edição). Confirma coerência entre partes (dados↔UI↔rotas↔SEO).
