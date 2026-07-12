@@ -233,7 +233,7 @@ async function nextEligible(): Promise<OrderRow | null> {
   const idsBloqueadas = ((bloqueadas ?? []) as { id: string }[]).map((c) => c.id);
   let q = supabase
     .from("studio_orders")
-    .select("id, user_id, app_id, texto, modo, estado, session_id, tokens_usados")
+    .select("id, user_id, app_id, texto, modo, estado, session_id, tokens_usados, tier")
     .in("estado", ["rascunho", "em_fila"])
     .order("created_at", { ascending: true })
     .limit(10);
