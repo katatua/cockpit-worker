@@ -23,6 +23,7 @@ import { runAgent } from "./agent.js";
 import { spawnPromise } from "./spawn-helpers.js";
 import { supabase, log, runlog, event } from "./db.js";
 import { commitAll, hasChanges, runCmd } from "./git.js";
+import { waitForPreviewDeploy } from "./vercel.js";
 
 export type Milestone = {
   id: string;
@@ -39,6 +40,8 @@ export type DeepBuildInput = {
   orderId: string;
   appId: string;
   userId: string;
+  vercelProjectId?: string;  // preview incremental: deploy por milestone
+  branch?: string;
 };
 
 export type DeepBuildResult = {
@@ -56,13 +59,15 @@ const PROGRESS_PATH = ".studio/progress.json"; // milestones já feitos (para re
 
 // Commit+push do progresso (por milestone) — persiste o trabalho na branch da
 // ordem, para uma interrupção NÃO recomeçar do zero (retoma daqui). Best-effort.
-async function commitPush(cwd: string, orderId: string, msg: string): Promise<void> {
+async function commitPush(cwd: string, orderId: string, msg: string): Promise<string | null> {
   try {
-    if (!(await hasChanges(cwd))) return;
-    await commitAll(cwd, msg);
+    if (!(await hasChanges(cwd))) return null;
+    const sha = await commitAll(cwd, msg);
     await runCmd("git", ["-C", cwd, "push", "--force", "origin", "HEAD"]);
+    return sha;
   } catch (e) {
     await runlog(orderId, "stderr", `commit incremental falhou (segue na mesma): ${e instanceof Error ? e.message.slice(0, 80) : String(e)}`);
+    return null;
   }
 }
 
@@ -146,7 +151,8 @@ async function buildOk(worktree: string): Promise<{ ok: boolean; erro: string }>
 
 // --- pipeline --------------------------------------------------------------
 export async function runDeepBuild(input: DeepBuildInput): Promise<DeepBuildResult> {
-  const { cwd, objetivo, baseSystemPrompt, orderId, appId, userId } = input;
+  const { cwd, objetivo, baseSystemPrompt, orderId, appId, userId, vercelProjectId, branch } = input;
+  let primeiroPreview = true; // preview incremental: anuncia o link na 1ª vez
   const t0 = Date.now();
   let tokens = 0;
   let sessionId: string | null = null;
@@ -256,6 +262,7 @@ MILESTONE ATUAL (${m.id}): ${m.titulo}
 Descrição: ${m.descricao}
 Ficheiros prováveis: ${m.ficheiros.join(", ") || "(decide tu)"}
 Critérios de aceitação deste milestone:\n${m.aceitacao.map((a) => `- ${a}`).join("\n")}
+COMUNICA COMO O ARQUITETO (regra importante — não caias em "modo mecânico"): a comunicação NÃO pode empobrecer só porque agora estás a codificar. ANTES de começar, diz numa frase HUMANA o que esta fase traz ao utilizador e a decisão que mais importa nela. À MEDIDA que avanças, narra o RACIOCÍNIO interessante em 1.ª pessoa e linguagem simples (o que estás a construir e porquê, o que ligaste ao quê) — NÃO narres "a ler este ficheiro, a ler aquele"; essa atividade mecânica já é mostrada à parte. O utilizador quer SENTIR o que estás a construir, com a mesma riqueza do plano. Zero tecnês (segue a regra de comunicação acima).
 Quando terminares, corre "npm run build" e confirma que fica verde. Só páras com o build verde.`,
       `\n\n${mapa}`,
     ].join("\n\n");
@@ -296,7 +303,19 @@ O "npm run build" falhou depois do milestone "${m.titulo}". Lê o erro REAL abai
     // interromper a seguir, o resume retoma daqui em vez do zero.
     doneIds.add(m.id);
     await writeFile(path.join(cwd, PROGRESS_PATH), JSON.stringify({ done: [...doneIds] }, null, 1));
-    await commitPush(cwd, orderId, `deep: ${m.titulo}`);
+    const sha = await commitPush(cwd, orderId, `deep: ${m.titulo}`);
+    // PREVIEW INCREMENTAL (2026-07-12): deploya o estado atual e mostra o link já —
+    // o utilizador vê a app a CRESCER em vez de um spinner até ao fim. Best-effort.
+    if (sha && vercelProjectId && branch) {
+      const dep = await waitForPreviewDeploy(vercelProjectId, branch, sha).catch(() => null);
+      if (dep?.url) {
+        await supabase.from("studio_orders").update({ preview_url: dep.url }).eq("id", orderId);
+        if (primeiroPreview) {
+          primeiroPreview = false;
+          await log(appId, orderId, userId, "agente", "texto", `Já podes espreitar a app a ganhar forma: ${dep.url} — continuo a construir por cima, ao vivo.`);
+        }
+      }
+    }
     } catch (e) {
       await runlog(orderId, "stderr", `milestone ${m.id} interrompido: ${e instanceof Error ? e.message.slice(0, 100) : String(e)} — continuo para o próximo`);
       await log(appId, orderId, userId, "agente", "atividade", `A fase "${m.titulo}" demorou de mais; sigo em frente e reviso tudo no fim.`);

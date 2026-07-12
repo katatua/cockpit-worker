@@ -367,6 +367,8 @@ Fio condutor: precisão e honestidade acima de velocidade. "Feito, ficou bom" é
               orderId: order.id,
               appId: order.app_id,
               userId: order.user_id,
+              vercelProjectId: app.vercel_project_id,
+              branch,
             })
           : await runAgent({
               cwd: worktree,
