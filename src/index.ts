@@ -54,9 +54,12 @@ async function interpretRascunho(order: OrderRow): Promise<void> {
     // Scaffolder no confirm(). O 0-coder nunca vê "reformula o pedido".
     if (result.kind === "app_nova") {
       const intencaoComRota = result.intencao + (result.nomeAppSugerido ? `\n\nNome sugerido: ${result.nomeAppSugerido}` : "");
+      // tier TAMBÉM aqui (o bug do OFÍCIO: app_nova complexa corria em 'simples'
+      // porque só o caminho 'trabalho' guardava o tier).
       await supabase.from("studio_orders").update({
-        estado: "aguarda_confirmacao", intencao: intencaoComRota, tokens_usados: result.tokensUsed,
+        estado: "aguarda_confirmacao", intencao: intencaoComRota, tier: result.tier, tokens_usados: result.tokensUsed,
       }).eq("id", order.id);
+      if (result.tier === "profundo") await runlog(order.id, "info", "app_nova tier=profundo → deep-build");
       await supabase.from("studio_messages").insert({
         app_id: order.app_id, order_id: order.id, user_id: order.user_id,
         autor: "agente", tipo: "confirmacao", conteudo: { text: intencaoComRota, kind: "app_nova", nome: result.nomeAppSugerido },

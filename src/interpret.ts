@@ -82,7 +82,10 @@ Responde SÓ com JSON válido: { "kind": ..., "tier": "simples"|"profundo", "int
 export async function interpret(texto: string, apiKey: string): Promise<InterpretResult> {
   const body = {
     model: "claude-fable-5",
-    max_tokens: 1200, // spec detalhada precisa de espaço
+    // Uma spec longa (ex.: OFÍCIO) gerava uma resposta grande que estourava o
+    // teto e vinha JSON TRUNCADO → parse falhava → o catch mostrava o JSON cru
+    // ao utilizador. Mais espaço + parse robusto (abaixo) fecham essa porta.
+    max_tokens: 3000,
     system: SYSTEM_PROMPT,
     messages: [{ role: "user", content: texto }],
   };
@@ -107,12 +110,30 @@ export async function interpret(texto: string, apiKey: string): Promise<Interpre
     .trim();
   let parsed: { kind: string; tier?: string; intencao?: string; especificacao?: string[]; resposta?: string; nomeAppSugerido?: string };
   try { parsed = JSON.parse(stripped); } catch {
-    parsed = { kind: "trabalho", intencao: rawText.split("\n")[0].slice(0, 200) };
+    // FALLBACK ROBUSTO (2026-07-12): JSON inválido/truncado → NUNCA mostrar o
+    // JSON cru. Extrai os campos por regex do texto bruto; o que não vier fica
+    // com um valor limpo derivado do pedido.
+    const grab = (k: string) => {
+      const m = new RegExp(`"${k}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`).exec(rawText);
+      return m ? m[1].replace(/\\"/g, '"').replace(/\\n/g, " ").trim() : undefined;
+    };
+    parsed = {
+      kind: grab("kind") ?? "trabalho",
+      tier: grab("tier"),
+      intencao: grab("intencao"),
+      nomeAppSugerido: grab("nomeAppSugerido"),
+      resposta: grab("resposta"),
+    };
   }
   const kind = parsed.kind === "conversa" ? "conversa"
     : parsed.kind === "app_nova" ? "app_nova"
     : "trabalho";
-  const intencao = parsed.intencao ?? (kind !== "conversa" ? `Vou tratar de: ${texto.slice(0, 80)}.` : "");
+  // SANITIZAÇÃO DURA: uma intenção que ainda "cheire" a JSON (chaves, "kind":)
+  // nunca chega ao utilizador — cai para um resumo limpo do pedido.
+  let intencao = parsed.intencao ?? "";
+  if (!intencao || /^[{[]/.test(intencao.trim()) || /"(kind|tier|intencao)"\s*:/.test(intencao)) {
+    intencao = kind === "conversa" ? "" : `Vou criar o que pediste: ${texto.replace(/\s+/g, " ").slice(0, 90)}…`;
+  }
   const tier: "simples" | "profundo" = parsed.tier === "profundo" && kind !== "conversa" ? "profundo" : "simples";
   return {
     kind,

@@ -60,6 +60,16 @@ const COMUNICACAO_UTILIZADOR = `--- COMO FALAS COM O UTILIZADOR (regra rígida, 
 Quem lê o teu texto ao vivo NÃO é programador. Fala em português simples, na 1.ª pessoa, dizendo O QUE ele vai ganhar — NUNCA o COMO por dentro. ZERO tecnês: PROIBIDO nomes de tecnologias/ferramentas (Next, React, Tailwind, Supabase, Vercel…) e termos como "store", "schema", "hook", "componente", "API", "endpoint", "estado", "localStorage", "tipos", "build", "commit", "SEO", "rota". Traduz sempre para o que interessa à pessoa. Ex.: em vez de «vou criar o store local-first com useSyncExternalStore», diz «vou preparar onde os teus projetos e tarefas ficam guardados no teu navegador». O raciocínio técnico vive NO CÓDIGO, não no chat.
 Isto vale para CADA frase que escreves no chat, INCLUSIVE quando "pensas alto" sobre como vais fazer: NUNCA despejes as tuas decisões/análises técnicas em tecnês (nomes de tecnologias, padrões, ficheiros). Se o pensamento é técnico, ou o guardas para ti e para os ficheiros, ou traduze-lo para o que a pessoa ganha. Uma frase técnica no chat = erro.`;
 
+// DISCIPLINA DE ENGENHARIA (regra de execução do dono) — vale para o CÓDIGO que
+// escreves, não para o chat. Builds complexos têm de ficar minuciosamente
+// documentados e seguros.
+const DISCIPLINA_CODIGO = `--- DISCIPLINA DE CÓDIGO (obrigatória neste build) ---
+1. DOCUMENTA minuciosamente: comenta TODA a dependência que introduzes (porquê) e TODA a alteração futura obrigatória, distinguindo claramente ATIVO vs. LEGACY vs. A-MUDAR nos comentários.
+2. ESQUELETO DETERMINÍSTICO: a lógica de estrutura vive em código/SQL determinístico; o LLM só na camada de julgamento (redigir/classificar/extrair). Nada de fluxos de risco escondidos.
+3. FALHAS TIPADAS E HONESTAS: estados de erro explícitos e tipados; NUNCA sucesso fabricado (o mesmo princípio da lei das integrações).
+4. SEGURANÇA NAS MIGRAÇÕES: toda a migração de base de dados nasce com RLS/guard ativo — nunca uma tabela sem política de acesso.
+5. RASCUNHO→ATIVO: nada de crítico é "promovido" sem validação; marca o que fica em rascunho.`;
+
 // --- #6 · MAPA DO REPO (determinístico) -----------------------------------
 // Árvore de ficheiros de código + símbolos exportados por ficheiro. Barato e
 // fiável (sem LLM). Dá ao arquiteto/implementador a "forma" do codebase sem
@@ -149,6 +159,7 @@ export async function runDeepBuild(input: DeepBuildInput): Promise<DeepBuildResu
   const arquitetoPrompt = [
     baseSystemPrompt,
     COMUNICACAO_UTILIZADOR,
+    DISCIPLINA_CODIGO,
     `--- O TEU PAPEL: ARQUITETO ---
 És o arquiteto de um build COMPLEXO (nível: app tão sofisticada como o próprio Studio). NÃO escreves código de features agora. A tua função é DECOMPOR o objetivo num plano de MILESTONES incrementais e verificáveis, cada um entregável e testável por si.
 1. LÊ o que precisares do repo (Read/Grep) para perceberes o que já existe — usa o MAPA DO REPO abaixo como índice.
@@ -201,6 +212,7 @@ REGRAS: entre 3 e ${CONFIG.DEEP_MAX_MILESTONES} milestones, ordenados por depend
     const implPrompt = [
       baseSystemPrompt,
       COMUNICACAO_UTILIZADOR,
+      DISCIPLINA_CODIGO,
       `--- O TEU PAPEL: IMPLEMENTADOR ---
 Estás a construir UM milestone de um plano maior, sobre a app que já existe no worktree. Faz SÓ este milestone, completo e com o build verde. Segue as leis de qualidade/honestidade acima (edições cirúrgicas, integrações honestas, imagens reais, multi-página+SEO, etc.). Lê o PLAN.md e ${PLAN_PATH} para o contexto global.
 MILESTONES JÁ FEITOS (não os refaças):\n${feitos}
@@ -247,6 +259,7 @@ O "npm run build" falhou depois do milestone "${m.titulo}". Lê o erro REAL abai
     const verifyPrompt = [
       baseSystemPrompt,
       COMUNICACAO_UTILIZADOR,
+      DISCIPLINA_CODIGO,
       `--- O TEU PAPEL: VERIFICADOR ---
 Todos os milestones foram implementados. A tua função é GARANTIR que o conjunto está correto e coerente (não só que compila). Lê ${PLAN_PATH}, corre "npm run build", corre testes se existirem ("npm test" — se falhar por não haver testes, ignora), e revê o diff geral (git diff --stat) contra a aceitação de CADA milestone.
 Se encontrares algo em falta ou partido, CORRIGE-O agora (tens autonomia total de edição). Confirma coerência entre partes (dados↔UI↔rotas↔SEO).
