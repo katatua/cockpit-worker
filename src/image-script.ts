@@ -21,6 +21,20 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // fal.ai desliga-se sozinho se a conta ficar sem saldo (403) — evita N chamadas 403.
 let falOff = !FAL;
 
+// 2026-07-13: fetch COM timeout. Sem isto, um pedido pendurado (blip de rede ou
+// provedor a estagnar) bloqueava um worker do pool PARA SEMPRE — e o Promise.all
+// do lote esperava por ele, travando a build inteira (visto: ~6min parado com o
+// fal.ai a responder 200/838ms noutros pedidos). Agora um pedido lento aborta e
+// o item cai para o outro provedor (ver emPoolMulti). fal ~1s, pro ~4s, imagen
+// ~13s, ideogram ~20s → 45s cobre o pior caso com folga.
+const IMG_TIMEOUT_MS = Number(process.env.STUDIO_IMG_TIMEOUT_MS || 45000);
+async function fetchT(url, opts, ms = IMG_TIMEOUT_MS) {
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), ms);
+  try { return await fetch(url, { ...(opts || {}), signal: c.signal }); }
+  finally { clearTimeout(t); }
+}
+
 // aspect -> image_size do fal.ai
 const FAL_SIZE = { "16:9": "landscape_16_9", "9:16": "portrait_16_9", "1:1": "square_hd", "4:5": "portrait_4_3", "3:2": "landscape_4_3", "2:3": "portrait_4_3" };
 
@@ -39,7 +53,7 @@ const FAL_MODELS = {
 };
 
 async function baixar(url, out) {
-  const img = await fetch(url);
+  const img = await fetchT(url);
   const buf = Buffer.from(await img.arrayBuffer());
   await mkdir(dirname(out), { recursive: true });
   // Os bytes TÊM de bater com a extensão. O fal.ai devolve JPEG; se o destino é
@@ -58,7 +72,7 @@ async function baixar(url, out) {
 async function viaFal({ prompt, out, aspect, model }) {
   const m = FAL_MODELS[model] || FAL_MODELS.schnell;
   for (let t = 0; t < 4; t++) {
-    const r = await fetch("https://fal.run/" + m.ep, {
+    const r = await fetchT("https://fal.run/" + m.ep, {
       method: "POST",
       headers: { authorization: "Key " + FAL, "content-type": "application/json" },
       body: JSON.stringify(m.body(prompt, aspect)),
@@ -78,11 +92,11 @@ async function viaReplicate({ prompt, out, aspect }) {
   // Retry com backoff no 429 (rate limit do Replicate). Sem isto, o lote
   // paralelo estourava o limite e arrastava o build (visto: 64min).
   for (let t = 0; t < 7; t++) {
-    const r = await fetch("https://api.replicate.com/v1/models/black-forest-labs/flux-schnell/predictions", {
+    const r = await fetchT("https://api.replicate.com/v1/models/black-forest-labs/flux-schnell/predictions", {
       method: "POST",
       headers: { authorization: "Bearer " + REPL, "content-type": "application/json", prefer: "wait" },
       body: JSON.stringify({ input: { prompt, aspect_ratio: aspect, output_format: "webp", num_outputs: 1, go_fast: true } }),
-    });
+    }, 60000);
     if (r.status === 429) { await sleep(2000 * (t + 1) + Math.floor(Math.random() * 800)); continue; }
     const j = await r.json();
     const url = j.output && j.output[0];
@@ -107,7 +121,7 @@ async function gerar({ prompt, out = "public/images/img.webp", aspect = "16:9", 
 // corre EM PARALELO com concorrência baixa para SOMAR capacidade sem estourar
 // o seu 429. Combinados, o lote sai mais depressa do que com qualquer um só.
 const PROVIDERS = [];
-if (FAL) PROVIDERS.push({ nome: "fal", conc: 6, gen: viaFal });
+if (FAL) PROVIDERS.push({ nome: "fal", conc: 10, gen: viaFal });
 if (REPL) PROVIDERS.push({ nome: "replicate", conc: 2, gen: viaReplicate });
 
 // Pool MULTI-PROVEDOR: fila partilhada, workers de cada provedor puxam o
