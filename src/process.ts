@@ -114,6 +114,12 @@ export async function processOrder(order: OrderRow): Promise<void> {
   let totalTokens = 0;
   const allToolsUsadas: Array<{ name: string; input: unknown }> = [];
   let allFinalText = "";
+  // 2026-07-12: último deploy que ficou READY nesta ordem (compilou + publicou +
+  // renderizou). Se as estratégias se esgotarem MAS existir um deploy bom,
+  // ENTREGA-SE esse com uma nota honesta em vez de desistir e mandar o dono
+  // "dividir o pedido" — nunca se deita fora um build que funciona. Ver
+  // entregarDegradado(). NULL só enquanto nenhuma iteração chegou a publicar.
+  let ultimoDeployBom: { url: string; deployId: string } | null = null;
 
   try {
     let agentMs = 0; // C5.3: duração da fase de execução (agente) na última iteração
@@ -424,7 +430,10 @@ Fio condutor: precisão e honestidade acima de velocidade. "Feito, ficou bom" é
         await runlog(order.id, "stderr", "sem alterações — próxima estratégia");
         const nx = await nextEstrategia(order.id, lastError);
         currentEstrategia = nx.estrategia;
-        if (nx.esgotada) throw new Error(esgotadaHumana(lastError));
+        if (nx.esgotada) {
+          if (ultimoDeployBom) { await entregarDegradado(order, ultimoDeployBom, lastError ?? "gate esgotado"); return; }
+          throw new Error(esgotadaHumana(lastError));
+        }
         continue;
       }
       const commitMsg = `studio: iter${iter} · ${order.texto.slice(0, 50)}${order.texto.length > 50 ? "…" : ""}\n\nordem: ${order.id} · estrategia: ${currentEstrategia}`;
@@ -462,6 +471,9 @@ Fio condutor: precisão e honestidade acima de velocidade. "Feito, ficou bom" é
       const deployMs = Date.now() - tDeploy0;
       const smokeLocal: import("./smoke.js").SmokeReport | null = null; // smoke corre a seguir contra o deploy
       await runlog(order.id, "deploy", `READY · ${deploy.url}`);
+      // Deploy publicado e READY → é um candidato entregável mesmo que um gate
+      // posterior falhe. Guardamo-lo para a entrega-degradada (ver esgotamento).
+      ultimoDeployBom = { url: deploy.url, deployId: deploy.deployId };
 
       // --- (6a) Quality gate HTTP link check ---
       await log(order.app_id, order.id, order.user_id, "agente", "atividade", "A verificar se tudo funciona…");
@@ -483,7 +495,10 @@ Fio condutor: precisão e honestidade acima de velocidade. "Feito, ficou bom" é
         await log(order.app_id, order.id, order.user_id, "agente", "erro_humano", resumo);
         const nx = await nextEstrategia(order.id, lastError);
         currentEstrategia = nx.estrategia;
-        if (nx.esgotada) throw new Error(esgotadaHumana(lastError));
+        if (nx.esgotada) {
+          if (ultimoDeployBom) { await entregarDegradado(order, ultimoDeployBom, lastError ?? "gate esgotado"); return; }
+          throw new Error(esgotadaHumana(lastError));
+        }
         continue;
       }
 
@@ -521,7 +536,10 @@ Fio condutor: precisão e honestidade acima de velocidade. "Feito, ficou bom" é
               `Ainda falta parte do que combinámos (${val.falhas.length} item${val.falhas.length > 1 ? "s" : ""}). Vou completar.`);
             const nx = await nextEstrategia(order.id, lastError);
             currentEstrategia = nx.estrategia;
-            if (nx.esgotada) throw new Error(esgotadaHumana(lastError));
+            if (nx.esgotada) {
+          if (ultimoDeployBom) { await entregarDegradado(order, ultimoDeployBom, lastError ?? "gate esgotado"); return; }
+          throw new Error(esgotadaHumana(lastError));
+        }
             continue;
           }
         }
@@ -535,6 +553,7 @@ Fio condutor: precisão e honestidade acima de velocidade. "Feito, ficou bom" é
       } else if (smoke) {
         await runlog(order.id, "info", `smoke: ${smoke.botoesTestados} botões, ${smoke.formulariosTestados} forms, ${smoke.consoleErros.length} erros consola, ${smoke.navegacoes} navegações, ${smoke.sementes} sementes (${smoke.duracaoMs}ms)`);
         for (const err of smoke.consoleErros.slice(0, 5)) await runlog(order.id, "stderr", `console: ${err}`);
+        for (const av of smoke.consoleAvisos.slice(0, 5)) await runlog(order.id, "info", `aviso-consola (não bloqueia): ${av}`);
         for (const b of smoke.botoesQuebrados.slice(0, 5)) await runlog(order.id, "stderr", `botão quebrado: ${b.seletor} · ${b.motivo}`);
         for (const f of smoke.formulariosQuebrados.slice(0, 5)) await runlog(order.id, "stderr", `form quebrado: ${f.seletor} · ${f.motivo}`);
         for (const n of smoke.naoTestaveis.slice(0, 5)) await runlog(order.id, "stderr", `não-testável: ${n.seletor} · ${n.motivo}`);
@@ -574,8 +593,19 @@ Fio condutor: precisão e honestidade acima de velocidade. "Feito, ficou bom" é
           await log(order.app_id, order.id, order.user_id, "agente", "erro_humano", resumo);
           const nx = await nextEstrategia(order.id, lastError);
           currentEstrategia = nx.estrategia;
-          if (nx.esgotada) throw new Error(esgotadaHumana(lastError));
+          if (nx.esgotada) {
+          if (ultimoDeployBom) { await entregarDegradado(order, ultimoDeployBom, lastError ?? "gate esgotado"); return; }
+          throw new Error(esgotadaHumana(lastError));
+        }
           continue;
+        }
+
+        // Gate PASSOU mas há avisos de consola (não-bloqueantes): nota honesta no
+        // chat — o site funciona, mas fica registado o que vale a pena limpar.
+        if (smoke.consoleAvisos.length > 0) {
+          const n = smoke.consoleAvisos.length;
+          await log(order.app_id, order.id, order.user_id, "agente", "texto",
+            `Nota honesta: o site funciona e passou nos testes, mas deixei ${n} aviso${n > 1 ? "s" : ""} técnico${n > 1 ? "s" : ""} na consola do browser (tipicamente hydration, imagens ou scripts de terceiros) — não afetam o uso. Posso limpá-los se quiseres.`);
         }
 
         // C6.5 · warn: o gate PASSOU mas há controlos cujo efeito o oráculo não
@@ -689,7 +719,9 @@ Fio condutor: precisão e honestidade acima de velocidade. "Feito, ficou bom" é
       }
       return;
     }
-    // Passou do MAX_ITER — safety net.
+    // Passou do MAX_ITER — safety net. Se houver um deploy bom, entrega-o antes
+    // de desistir (nunca deitar fora um build que funciona).
+    if (ultimoDeployBom) { await entregarDegradado(order, ultimoDeployBom, lastError ?? "limite de iterações"); return; }
     throw new Error(esgotadaHumana("limite absoluto de iterações"));
   } catch (e) {
     const motivo = e instanceof Error ? e.message : String(e);
@@ -721,6 +753,35 @@ Fio condutor: precisão e honestidade acima de velocidade. "Feito, ficou bom" é
     } catch { /* best-effort */ }
     try { await rm(path.join(CONFIG.WORKTREE_ROOT, order.id), { recursive: true, force: true }); } catch { /* best-effort */ }
   }
+}
+
+// 2026-07-12: entrega-degradada. Chamada quando as estratégias se esgotam MAS
+// existe um deploy READY (compilou + publicou + renderizou). Em vez de `fail()`
+// — que punha estado="falhou" e mandava o dono "dividir o pedido" — publica o
+// preview que FUNCIONA com uma nota honesta do que não ficou perfeito. Nunca se
+// deita fora um build bom por um gate secundário (erros de consola, um botão,
+// um critério de aceitação). O dono vê o resultado e decide iterar daqui.
+async function entregarDegradado(
+  order: OrderRow,
+  deploy: { url: string; deployId: string },
+  motivo: string,
+) {
+  // Traduz o motivo técnico para uma frase curta e humana (zero tecnês).
+  const humano =
+    /console/i.test(motivo) ? "há alguns avisos técnicos na consola do browser"
+    : /bot(ão|ao|ões|oes)/i.test(motivo) ? "um ou outro botão pode não reagir como esperado"
+    : /form/i.test(motivo) ? "algum formulário pode não estar 100%"
+    : /incompleta|aceita|critério|criterio/i.test(motivo) ? "pode faltar afinar um detalhe do que combinámos"
+    : /link|404|broken/i.test(motivo) ? "algum link pode não apontar bem"
+    : "pode faltar afinar um pormenor";
+  await supabase.from("studio_orders").update({
+    preview_url: deploy.url, preview_deploy_id: deploy.deployId,
+    estado: "preview_pronto", erro: null,
+  }).eq("id", order.id);
+  await log(order.app_id, order.id, order.user_id, "agente", "texto",
+    `Publiquei a versão que está a funcionar — já a podes abrir e ver. Para ser honesto, ${humano}; ` +
+    `não deitei fora o trabalho por causa disso. Se quiseres, diz-me o que afinar e continuo a partir daqui (não recomeço do zero).`);
+  await event(order.app_id, order.id, order.user_id, "worker.entregue_degradado", { url: deploy.url, motivo });
 }
 
 async function fail(order: OrderRow, motivo: string) {

@@ -6,7 +6,8 @@
  *     ou nova página) e não deixou erro na consola
  *   - Cada link interno abre sem 404 (já cobrimos em quality.ts, mas repetimos
  *     ao vivo com o browser real que respeita JS)
- *   - Consola: qualquer erro `console.error` ou `unhandledrejection` = falha
+ *   - Consola: `pageerror` (exceção não apanhada) e HTTP >=400 = FALHA.
+ *     `console.error` do site = AVISO honesto, NÃO falha (2026-07-12).
  *
  * Constrangimentos:
  *   - Máximo 30s por teste (timeout global)
@@ -22,7 +23,15 @@ export type SmokeReport = {
   // Infra do worker falhou (browser não arrancou) — NÃO é problema da app do
   // utilizador: a ordem não chumba, o dono é notificado (event smoke.skip).
   skip?: string;
+  // BLOQUEANTES: pageerror (exceção JS não apanhada) + respostas HTTP >=400.
+  // São sinais de app REALMENTE partida (página que rebenta / fetch a falhar).
   consoleErros: string[];
+  // NÃO-BLOQUEANTES (2026-07-12): mensagens `console.error` do site. Um site
+  // que compila, renderiza e navega NÃO deve ser deitado fora por hydration
+  // warnings, avisos do framer-motion/imagens, ou logs de terceiros. Reportam-
+  // se com honestidade no chat, mas NÃO chumbam o gate nem alimentam retries.
+  // (Foi o bug que recusou entregar um site de 21 páginas por "4 erros consola".)
+  consoleAvisos: string[];
   botoesTestados: number;
   botoesQuebrados: { seletor: string; motivo: string }[];
   // C6.4: controlo com handler mas sem efeito observável NEM estado acessível
@@ -199,6 +208,7 @@ export async function smokeTest(previewUrl: string, rotas: string[] = ["/"]): Pr
   const report: SmokeReport = {
     ok: true,
     consoleErros: [],
+    consoleAvisos: [],
     botoesTestados: 0,
     botoesQuebrados: [],
     naoTestaveis: [],
@@ -232,7 +242,9 @@ export async function smokeTest(previewUrl: string, rotas: string[] = ["/"]): Pr
       if (msg.type() !== "error") return;
       const txt = msg.text();
       if (CONSOLE_BENIGNO.test(txt)) return;
-      report.consoleErros.push(txt.slice(0, 200));
+      // console.error → AVISO não-bloqueante (2026-07-12). Reportado, mas não
+      // chumba um site que compila+renderiza+navega. Só pageerror/HTTP chumbam.
+      report.consoleAvisos.push(txt.slice(0, 200));
     });
     page.on("pageerror", (err) => report.consoleErros.push(`pageerror: ${err.message.slice(0, 200)}`));
     // C6.10: respostas HTTP >=400 e requests falhados também contam (um fetch

@@ -144,5 +144,5 @@ export function esgotadaHumana(motivoOriginal: string): string {
     ? "Parece que os formulários não estão a ser preenchidos correctamente. Descreve os campos que queres e o que deve acontecer ao submeter."
     : "Divide o pedido em partes mais pequenas — uma peça de cada vez costuma funcionar melhor.";
 
-  return `Tentei várias abordagens (simplificar, cortar features, refazer do zero) mas nenhuma resultou. ${sug}`;
+  return `Tentei várias abordagens (simplificar e cortar features secundárias) mas nenhuma resultou. ${sug}`;
 }
