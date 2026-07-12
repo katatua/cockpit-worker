@@ -52,6 +52,13 @@ export type DeepBuildResult = {
 const PLAN_PATH = ".studio/plan.json";
 const VERIFY_PATH = ".studio/verify.json";
 
+// REGRA DE COMUNICAÇÃO (2026-07-12) — a mais importante para o utilizador ver.
+// O modo profundo usa papéis "arquiteto/implementador" que tendem a falar como
+// engenheiros. Mas o utilizador NÃO é programador e vê o texto AO VIVO. Isto
+// força a mesma régua "zero tecnês" do resto do Studio em TODAS as fases.
+const COMUNICACAO_UTILIZADOR = `--- COMO FALAS COM O UTILIZADOR (regra rígida, acima do teu papel) ---
+Quem lê o teu texto ao vivo NÃO é programador. Fala em português simples, na 1.ª pessoa, dizendo O QUE ele vai ganhar — NUNCA o COMO por dentro. ZERO tecnês: PROIBIDO nomes de tecnologias/ferramentas (Next, React, Tailwind, Supabase, Vercel…) e termos como "store", "schema", "hook", "componente", "API", "endpoint", "estado", "localStorage", "tipos", "build", "commit", "SEO", "rota". Traduz sempre para o que interessa à pessoa. Ex.: em vez de «vou criar o store local-first com useSyncExternalStore», diz «vou preparar onde os teus projetos e tarefas ficam guardados no teu navegador». O raciocínio técnico vive NO CÓDIGO, não no chat.`;
+
 // --- #6 · MAPA DO REPO (determinístico) -----------------------------------
 // Árvore de ficheiros de código + símbolos exportados por ficheiro. Barato e
 // fiável (sem LLM). Dá ao arquiteto/implementador a "forma" do codebase sem
@@ -137,9 +144,10 @@ export async function runDeepBuild(input: DeepBuildInput): Promise<DeepBuildResu
   await runlog(orderId, "info", `mapa do repo gerado (${mapa.split("\n").length} linhas)`);
 
   // --- B · arquiteto (Opus) ---
-  await log(appId, orderId, userId, "agente", "pensamento", "A desenhar a arquitetura e a dividir o trabalho em fases…");
+  await log(appId, orderId, userId, "agente", "pensamento", "A planear como vou construir isto, passo a passo…");
   const arquitetoPrompt = [
     baseSystemPrompt,
+    COMUNICACAO_UTILIZADOR,
     `--- O TEU PAPEL: ARQUITETO ---
 És o arquiteto de um build COMPLEXO (nível: app tão sofisticada como o próprio Studio). NÃO escreves código de features agora. A tua função é DECOMPOR o objetivo num plano de MILESTONES incrementais e verificáveis, cada um entregável e testável por si.
 1. LÊ o que precisares do repo (Read/Grep) para perceberes o que já existe — usa o MAPA DO REPO abaixo como índice.
@@ -147,7 +155,7 @@ export async function runDeepBuild(input: DeepBuildInput): Promise<DeepBuildResu
 3. Escreve DOIS ficheiros:
    - "PLAN.md" (humano): visão, decisões de arquitetura, e a lista de milestones.
    - "${PLAN_PATH}" (máquina): um ARRAY JSON de milestones. Cada milestone:
-     { "id": "m1", "titulo": "curto", "descricao": "o que fazer, concreto, ao nível de ficheiros/rotas/tabelas", "ficheiros": ["caminhos prováveis"], "aceitacao": ["critérios VISÍVEIS/testáveis de que este milestone ficou feito"] }
+     { "id": "m1", "titulo": "curto e SEM TECNÊS — o UTILIZADOR vê isto no chat (ex.: 'Guardar os teus projetos e tarefas', NÃO 'Fundação de dados & store local-first')", "descricao": "técnico e concreto ao nível de ficheiros/rotas/tabelas — isto é INTERNO, o utilizador não vê", "ficheiros": ["caminhos prováveis"], "aceitacao": ["critérios VISÍVEIS/testáveis de que este milestone ficou feito"] }
 REGRAS: entre 3 e ${CONFIG.DEEP_MAX_MILESTONES} milestones, ordenados por dependência (fundação → features → polish). Cada um pequeno o suficiente para um agente o fazer e o build ficar verde no fim. Inclui SEMPRE um milestone final de integração/verificação. Pensa como engenheiro sénior: schema de dados primeiro, depois APIs, depois UI, depois SEO/polish. Não inventes segredos (segue a lei das integrações). Termina quando ${PLAN_PATH} estiver escrito e válido.`,
     `\n\n${mapa}`,
     `\n\nOBJETIVO A DECOMPOR:\n${objetivo}`,
@@ -165,10 +173,18 @@ REGRAS: entre 3 e ${CONFIG.DEEP_MAX_MILESTONES} milestones, ordenados por depend
     await runlog(orderId, "stderr", "arquiteto não produziu plano válido — a degradar para milestone único");
     milestones = [{ id: "m1", titulo: "Construir o objetivo", descricao: objetivo, ficheiros: [], aceitacao: ["A app cumpre o objetivo pedido"] }];
   }
-  milestones = milestones.slice(0, CONFIG.DEEP_MAX_MILESTONES);
+  // Normaliza — o arquiteto (LLM) pode omitir campos; sem isto um `.map` de
+  // aceitacao/ficheiros indefinido rebentava o pipeline inteiro.
+  milestones = milestones.slice(0, CONFIG.DEEP_MAX_MILESTONES).map((m, i) => ({
+    id: typeof m.id === "string" && m.id ? m.id : `m${i + 1}`,
+    titulo: typeof m.titulo === "string" && m.titulo ? m.titulo : `Fase ${i + 1}`,
+    descricao: typeof m.descricao === "string" ? m.descricao : "",
+    ficheiros: Array.isArray(m.ficheiros) ? m.ficheiros : [],
+    aceitacao: Array.isArray(m.aceitacao) ? m.aceitacao : [],
+  }));
   await supabase.from("studio_orders").update({ plano_build: milestones }).eq("id", orderId);
   await event(appId, orderId, userId, "deep.plano", { milestones: milestones.length });
-  await log(appId, orderId, userId, "agente", "texto", `Plano: ${milestones.length} fases — ${milestones.map((m) => m.titulo).join(" · ")}`);
+  await log(appId, orderId, userId, "agente", "texto", `Vou construir isto em ${milestones.length} passos: ${milestones.map((m) => m.titulo).join(" · ")}.`);
 
   // --- C+D · implementar cada milestone, com verificação por milestone ---
   for (let i = 0; i < milestones.length; i++) {
@@ -183,6 +199,7 @@ REGRAS: entre 3 e ${CONFIG.DEEP_MAX_MILESTONES} milestones, ordenados por depend
     const feitos = milestones.slice(0, i).map((x) => `✓ ${x.titulo}`).join("\n") || "(nenhum ainda)";
     const implPrompt = [
       baseSystemPrompt,
+      COMUNICACAO_UTILIZADOR,
       `--- O TEU PAPEL: IMPLEMENTADOR ---
 Estás a construir UM milestone de um plano maior, sobre a app que já existe no worktree. Faz SÓ este milestone, completo e com o build verde. Segue as leis de qualidade/honestidade acima (edições cirúrgicas, integrações honestas, imagens reais, multi-página+SEO, etc.). Lê o PLAN.md e ${PLAN_PATH} para o contexto global.
 MILESTONES JÁ FEITOS (não os refaças):\n${feitos}
@@ -209,6 +226,7 @@ Quando terminares, corre "npm run build" e confirma que fica verde. Só páras c
       await log(appId, orderId, userId, "agente", "atividade", `A corrigir um erro de compilação (${m.titulo})…`);
       const fixPrompt = [
         baseSystemPrompt,
+        COMUNICACAO_UTILIZADOR,
         `--- O TEU PAPEL: CORRETOR (o build está VERMELHO) ---
 O "npm run build" falhou depois do milestone "${m.titulo}". Lê o erro REAL abaixo, NOMEIA a causa (L2) e corrige na raiz com o mínimo de mudança (L1/L3). Não teorizes — o erro está aqui:\n\n${bok.erro}`,
       ].join("\n\n");
@@ -227,10 +245,11 @@ O "npm run build" falhou depois do milestone "${m.titulo}". Lê o erro REAL abai
     await log(appId, orderId, userId, "agente", "pensamento", "A rever tudo contra o plano e a garantir coerência…");
     const verifyPrompt = [
       baseSystemPrompt,
+      COMUNICACAO_UTILIZADOR,
       `--- O TEU PAPEL: VERIFICADOR ---
 Todos os milestones foram implementados. A tua função é GARANTIR que o conjunto está correto e coerente (não só que compila). Lê ${PLAN_PATH}, corre "npm run build", corre testes se existirem ("npm test" — se falhar por não haver testes, ignora), e revê o diff geral (git diff --stat) contra a aceitação de CADA milestone.
 Se encontrares algo em falta ou partido, CORRIGE-O agora (tens autonomia total de edição). Confirma coerência entre partes (dados↔UI↔rotas↔SEO).
-No fim escreve "${VERIFY_PATH}" com: { "ok": true|false, "resumo": "1-3 frases honestas do que ficou feito", "por_fazer": ["o que o DONO tem de fazer, ex. adicionar chaves"], "problemas": ["o que ficou por resolver, se algum"] }.
+No fim escreve "${VERIFY_PATH}" com: { "ok": true|false, "resumo": "<markdown, 1.ª pessoa, estilo engenheiro sénior a entregar — o que construíste por subsistema, decisões técnicas que importam, e pontos de coerência que confirmaste; rico como uma boa mensagem de handoff, NÃO uma frase seca>", "por_fazer": ["o que o DONO tem de fazer, ex. adicionar chaves/configurar um serviço"], "problemas": ["o que ficou por resolver honestamente, se algum"] }.
 Termina com o build verde e ${VERIFY_PATH} escrito.`,
     ].join("\n\n");
     const rVer = await runAgent({

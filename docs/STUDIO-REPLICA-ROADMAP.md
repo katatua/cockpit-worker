@@ -22,14 +22,35 @@ teto era a **jaula** à volta:
 
 | # | Peça | Estado | Modelo |
 |---|------|--------|--------|
-| 1 | Tier `profundo` sem teto (iterações/tempo), gate biométrico no confirm | 🟡 | — |
-| 2 | Pipeline multi-agente no build: arquiteto→implementador(es)→verificador | 🟡 | Opus/Sonnet/Opus |
-| 3 | Oráculo forte: escreve+corre testes, conduz fluxos reais, lê logs | 🟡 | Sonnet/Opus |
-| 4 | Provisionamento multi-serviço (Supabase/Fly/secrets/x402) | ⚪ desenho | — |
-| 5 | Camada de plano/decomposição viva (PLAN.md no repo) | 🟡 | Opus |
-| 6 | Contexto profundo: mapa do repo (árvore + símbolos) por fase | 🟡 | Haiku/código |
+| 1 | Tier `profundo` sem teto (orçamento tempo 4h em vez de 12min) | ✅ worker · 🟡 gate biométrico (cockpit) | — |
+| 2 | Pipeline multi-agente: arquiteto→implementador→verificador (deep-build.ts) | ✅ construído, em teste E2E | Opus/Sonnet/Opus |
+| 3 | Oráculo forte: build gate por milestone + verificador corre testes/revê diff | 🟡 (build+verify sim; testes só se existirem) | Sonnet/Opus |
+| 4 | Provisionamento multi-serviço (Supabase/Fly/secrets/x402) | ⚪ desenho abaixo | — |
+| 5 | Plano/decomposição vivo (PLAN.md + .studio/plan.json no repo) | ✅ construído | Opus |
+| 6 | Contexto profundo: mapa do repo (árvore + símbolos exportados) | ✅ construído (determinístico) | código |
 
-Legenda: ✅ feito · 🟡 em construção · ⚪ por fazer / bloqueado.
+Legenda: ✅ feito · 🟡 parcial/em teste · ⚪ por fazer / bloqueado.
+
+### Desenho do #4 (provisionamento) — porque fica para depois do teste
+
+O worker constrói UM Next.js e deploya para UM Vercel. Uma app complexa "a sério"
+precisa de serviços reais (BD, auth, filas). Fatia segura (a fazer): a build
+DECLARA os recursos de que precisa (`.studio/requires.json` = env vars + porquê +
+onde obter) e o worker emite evento + mensagem honesta; o dono preenche no Vercel
+(ou Cofre) — nunca o agente inventa segredos. Fatia completa (bloqueada por risco
+de infra real, decisão de tocar em produção): criar projeto Supabase / máquina Fly
+/ x402 a partir do agente, atrás de biometria. **Nota dura (memória):** o Supabase
+Free só deixa 2 projetos ativos — auto-provisionar Supabase precisa de plano pago.
+
+### GAPS cross-repo (cockpit) — runbook para amanhã
+
+- **Gate biométrico no confirm de builds profundos** (regra do dono: biometria p/
+  gastar). Vive em `cockpit/app/api/studio/orders/[id]/confirm/route.ts` — exigir
+  WebAuthn quando `order.tier='profundo'`. Hoje o worker já honra o tier; falta a
+  fricção biométrica no clique "Avançar".
+- **Propagar tier em app_nova**: `confirm/route.ts` cria a ordem nova sem `tier`;
+  passar `order.tier` para a ordem da app nova.
+- **Badge de tier na UI** (`Workspace.tsx`): mostrar "build profundo" no card.
 
 ## Decisões de arquitetura (tomadas autonomamente)
 
