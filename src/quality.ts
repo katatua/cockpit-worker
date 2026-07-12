@@ -33,9 +33,15 @@ export type QualityReport = {
 const CACHE = new Map<string, boolean>();
 const TIMEOUT_MS = 8000;
 
-async function fetchWithTimeout(url: string): Promise<{ status: number; body?: string }> {
+// LOCAL_GATE (2026-07-12): quando o gate corre contra o `next dev` local (em
+// vez do deploy Vercel), uma rota ainda não compilada pode demorar bem mais
+// que 8s a responder ao 1º pedido — mesmo com warmup prévio. Por isso o
+// timeout passou a ser PARAMETRIZÁVEL por chamada (ver checkQuality); o
+// default mantém-se 8000 = comportamento IDÊNTICO ao atual quando quem chama
+// não especifica (caminho `else`/flag OFF).
+async function fetchWithTimeout(url: string, timeoutMs: number = TIMEOUT_MS): Promise<{ status: number; body?: string }> {
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const r = await fetch(url, { signal: ctrl.signal, redirect: "manual" });
     const body = r.headers.get("content-type")?.includes("text/html") ? await r.text() : undefined;
@@ -153,13 +159,20 @@ export async function verificarVideos(worktree: string): Promise<{ checked: numb
   return { checked, falhas };
 }
 
-/** Corre o gate. Devolve report; o chamador decide se avança para preview_pronto. */
-export async function checkQuality(previewUrl: string, rotas: string[] = ["/"]): Promise<QualityReport> {
+/**
+ * Corre o gate. Devolve report; o chamador decide se avança para preview_pronto.
+ *
+ * @param timeoutMs Timeout por pedido HTTP. Default 8000 = comportamento
+ *   ATUAL (deploy Vercel, já aquecido). LOCAL_GATE passa um valor maior
+ *   (30000) porque o alvo pode ser o `next dev` local ainda a compilar
+ *   on-demand uma rota que o warmup não cobriu.
+ */
+export async function checkQuality(previewUrl: string, rotas: string[] = ["/"], timeoutMs: number = 8000): Promise<QualityReport> {
   const base = new URL(previewUrl);
   const report: QualityReport = { ok: true, base: base.toString(), checked: 0, falhas: [] };
 
   // 1) Rota principal
-  const home = await fetchWithTimeout(previewUrl).catch((e) => ({ status: 0, error: e.message } as { status: number }));
+  const home = await fetchWithTimeout(previewUrl, timeoutMs).catch((e) => ({ status: 0, error: e.message } as { status: number }));
   report.checked++;
   if (home.status < 200 || home.status >= 400) {
     report.falhas.push({ url: previewUrl, status: home.status, motivo: "rota principal não responde 2xx/3xx" });
@@ -184,7 +197,7 @@ export async function checkQuality(previewUrl: string, rotas: string[] = ["/"]):
       if (CACHE.has(u)) return;
       report.checked++;
       try {
-        const r = await fetchWithTimeout(u);
+        const r = await fetchWithTimeout(u, timeoutMs);
         CACHE.set(u, true);
         if (r.status >= 400) {
           report.falhas.push({ url: u, status: r.status, motivo: `${r.status} ao GET` });
@@ -207,13 +220,13 @@ export async function checkQuality(previewUrl: string, rotas: string[] = ["/"]):
     if (rota.includes("[")) {
       const prefixo = rota.slice(0, rota.indexOf("["));
       const pai = prefixo.replace(/\/$/, "") || "/";
-      const rp = await fetchWithTimeout(`${base.origin}${pai === "/" ? "" : pai}`).catch(() => ({ status: 0 } as { status: number; body?: string }));
+      const rp = await fetchWithTimeout(`${base.origin}${pai === "/" ? "" : pai}`, timeoutMs).catch(() => ({ status: 0 } as { status: number; body?: string }));
       const esc = prefixo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const m = rp.body?.match(new RegExp(`href=["'](${esc}[^"'/][^"']*)["']`, "i"));
       if (!m) continue;
       path = m[1];
     }
-    const r = await fetchWithTimeout(`${base.origin}${path}`).catch(() => ({ status: 0 } as { status: number; body?: string }));
+    const r = await fetchWithTimeout(`${base.origin}${path}`, timeoutMs).catch(() => ({ status: 0 } as { status: number; body?: string }));
     if (r.body) htmls.push(r.body);
   }
   const ytIds = new Set<string>();

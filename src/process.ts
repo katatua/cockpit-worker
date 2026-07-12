@@ -22,7 +22,7 @@ import { runAgent } from "./agent.js";
 import { runDeepBuild } from "./deep-build.js";
 import { STUDIO_IMAGE_SCRIPT } from "./image-script.js";
 import { gerarAceitacao, validarAceitacao } from "./aceitacao.js";
-import { stop as stopPreview } from "./preview-manager.js";
+import { stop as stopPreview, ensurePreview, touch as touchPreview } from "./preview-manager.js";
 import { waitForPreviewDeploy } from "./vercel.js";
 import { checkQuality, verificarVideos } from "./quality.js";
 import { smokeTest } from "./smoke.js";
@@ -58,6 +58,80 @@ function step(plano: Plano, id: string, estado: Plano["passos"][number]["estado"
       return { ...p, estado, ...extra };
     }),
   };
+}
+
+// --- GATE LOCAL + DEPLOY-ÚNICO (2026-07-12) · helpers ---------------------
+// Ambos só são chamados quando CONFIG.LOCAL_GATE === true (ver processOrder).
+// Ficam module-level (em vez de closures dentro de processOrder) para não
+// dependerem do `worktree`/`branch` de uma iteração específica do loop —
+// recebem tudo como parâmetro, o que também os torna testáveis isoladamente.
+
+/**
+ * Prepara o gate local: arranca (ou reutiliza) o `next dev` deste worktree
+ * via `ensurePreview` (preview-manager.ts, modo C1.4 — o mesmo mecanismo do
+ * "rascunho ao vivo", reutilizado tal e qual) e aquece as rotas ANTES do
+ * gate correr contra elas. Sem warmup, o 1º pedido a cada rota paga a
+ * compilação on-demand do Next e pode estourar o timeout do quality gate —
+ * foi essa a causa-raiz do revert documentado em (5)/nota histórica; o
+ * warmup + timeout maior (CONFIG.LOCAL_GATE_WARMUP_MS / checkQuality 30s)
+ * é o que torna esta 2ª tentativa seguro.
+ *
+ * `touchPreview` evita que o idle-sweep (20min) desligue o dev server a
+ * meio de uma ordem longa. Erros de fetch no warmup são ENGOLIDOS de
+ * propósito — o objetivo é só "pagar" a compilação, não verificar nada
+ * (quem verifica é o gate a seguir); se a rota realmente estiver partida,
+ * o gate chumba-a da forma habitual, com o report certo.
+ */
+async function prepararGateLocal(slug: string, branch: string, worktree: string, rotas: string[]): Promise<string> {
+  const { port } = await ensurePreview(slug, branch, worktree);
+  touchPreview(slug);
+  const base = `http://127.0.0.1:${port}`;
+
+  // Rotas dinâmicas ([id], [slug]…) não têm URL concreta para aquecer —
+  // fica ao critério do gate resolvê-las (como já faz hoje). "/" entra
+  // sempre, mesmo que não venha em `rotas`.
+  const rotasWarmup = new Set<string>(["/"]);
+  for (const r of rotas) if (r && !r.includes("[")) rotasWarmup.add(r);
+
+  for (const rota of rotasWarmup) {
+    const url = `${base}${rota === "/" ? "" : rota}`;
+    // 2 hits sequenciais: o 1º paga a compilação on-demand (pode demorar);
+    // o 2º (descartado na mesma) confirma que ficou servido a quente. Nunca
+    // lança — falhas aqui são esperadas (rota pode não existir de facto) e
+    // não devem abortar o warmup das restantes.
+    for (let i = 0; i < 2; i++) {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), CONFIG.LOCAL_GATE_WARMUP_MS);
+      try {
+        await fetch(url, { signal: ctrl.signal });
+      } catch {
+        /* engolido de propósito — ver comentário da função */
+      } finally {
+        clearTimeout(t);
+      }
+    }
+  }
+  return base;
+}
+
+/**
+ * Tenta UM deploy do estado JÁ COMMITADO (push + poll Vercel) e devolve-o,
+ * ou `null` se falhar. Usado só nos pontos de esgotamento de estratégia
+ * (loop-detector) quando LOCAL_GATE está ON e não há `ultimoDeployBom`
+ * ainda — evita desistir (fail()) quando existe trabalho commitado que
+ * talvez publique e sirva, mesmo que o gate local não tenha chegado a
+ * confirmar. Nunca lança: um `null` aqui só significa "sem candidato para
+ * entrega-degradada", o chamador decide entre isso e o `throw` honesto.
+ */
+async function deployAtualOuNull(app: AppRow, branch: string, worktree: string, sha: string): Promise<{ url: string; deployId: string } | null> {
+  try {
+    await push(worktree, branch);
+    // Não-nulo garantido: processOrder só chega aqui depois de validar
+    // app.vercel_project_id no arranque da ordem (early-return se faltar).
+    return await waitForPreviewDeploy(app.vercel_project_id as string, branch, sha);
+  } catch {
+    return null;
+  }
 }
 
 export async function processOrder(order: OrderRow): Promise<void> {
@@ -120,6 +194,15 @@ export async function processOrder(order: OrderRow): Promise<void> {
   // "dividir o pedido" — nunca se deita fora um build que funciona. Ver
   // entregarDegradado(). NULL só enquanto nenhuma iteração chegou a publicar.
   let ultimoDeployBom: { url: string; deployId: string } | null = null;
+  // LOCAL_GATE (2026-07-12): último sha commitado nesta ordem (persiste entre
+  // iterações) — usado para tentar UM deploy de emergência no esgotamento
+  // quando não há `ultimoDeployBom` (ver deployAtualOuNull). Com a flag OFF
+  // nunca é lido, só escrito (byte-a-byte inofensivo).
+  let ultimoSha: string | null = null;
+  // Telemetria (3f): quantos deploys Vercel REAIS esta ordem fez. Com a flag
+  // OFF, é sempre 1 por iteração até ao sucesso (idêntico ao existente); com
+  // a flag ON, deve tender para 1 no total (o objetivo da otimização).
+  let nDeploys = 0;
 
   try {
     let agentMs = 0; // C5.3: duração da fase de execução (agente) na última iteração
@@ -431,16 +514,30 @@ Fio condutor: precisão e honestidade acima de velocidade. "Feito, ficou bom" é
         const nx = await nextEstrategia(order.id, lastError);
         currentEstrategia = nx.estrategia;
         if (nx.esgotada) {
-          if (ultimoDeployBom) { await entregarDegradado(order, ultimoDeployBom, lastError ?? "gate esgotado"); return; }
+          // LOCAL_GATE: sem ultimoDeployBom, tenta UM deploy do último commit
+          // conhecido (se houver) antes de desistir — nunca deitar fora um
+          // build que já existe só porque ESTA iteração não mudou nada.
+          const viaFallback = !ultimoDeployBom && CONFIG.LOCAL_GATE && !!ultimoSha;
+          const dep = ultimoDeployBom ?? (viaFallback ? await deployAtualOuNull(app, branch, worktree, ultimoSha as string) : null);
+          if (viaFallback && dep) nDeploys++;
+          if (dep) { await entregarDegradado(order, dep, lastError ?? "gate esgotado"); return; }
           throw new Error(esgotadaHumana(lastError));
         }
         continue;
       }
       const commitMsg = `studio: iter${iter} · ${order.texto.slice(0, 50)}${order.texto.length > 50 ? "…" : ""}\n\nordem: ${order.id} · estrategia: ${currentEstrategia}`;
       const sha = await commitAll(worktree, commitMsg);
+      ultimoSha = sha; // LOCAL_GATE: último sha conhecido p/ deploy de emergência no esgotamento
       await runlog(order.id, "edit", `commit ${sha.slice(0, 7)}`);
-      await push(worktree, branch);
-      await runlog(order.id, "stdout", `push origin ${branch}`);
+      // LOCAL_GATE (flag OFF = comportamento atual, push todas as iterações):
+      // com o gate local, o push por iteração deixa de ser necessário — só há
+      // push no deploy-único do sucesso (bloco 6d) ou no deploy de emergência
+      // do esgotamento (deployAtualOuNull). O commitAll acima corre sempre
+      // (dá o sha, reseta hasChanges); o push final leva todos os commits.
+      if (!CONFIG.LOCAL_GATE) {
+        await push(worktree, branch);
+        await runlog(order.id, "stdout", `push origin ${branch}`);
+      }
       const stat = await diffStat(worktree);
       plano = step(plano, "p3", "feito");
       await supabase.from("studio_orders").update({ plano, commit_sha: sha, diff_resumo: stat }).eq("id", order.id);
@@ -459,27 +556,72 @@ Fio condutor: precisão e honestidade acima de velocidade. "Feito, ficou bom" é
       // Se o dev server não arrancar, o smoke repete-se contra o deploy (honesto).
       plano = step(plano, "p4", "em_execucao"); await supabase.from("studio_orders").update({ plano }).eq("id", order.id);
       await log(order.app_id, order.id, order.user_id, "agente", "atividade", "A esperar que a pré-visualização fique pronta…");
-      await runlog(order.id, "deploy", `poll vercel · branch=${branch}`);
-      const tDeploy0 = Date.now();
-      const rotasSmoke = await discoverRoutes(worktree).catch(() => ["/"]);
       // C5 revisto (2026-07-04): o smoke corre contra o DEPLOY (fiável, já
       // READY), não contra o dev server local — este último dava timeout de
       // goto (dev server lento a arrancar) e chumbava apps BOAS com falso
       // negativo (visto no site de férias: deploy + 8/8 aceitação OK mas
       // smoke local 127.0.0.1 timeout → retry → falha). Correção > micro-speed.
-      const deploy = await waitForPreviewDeploy(app.vercel_project_id, branch, sha);
+      //
+      // LOCAL_GATE (2026-07-12, flag STUDIO_LOCAL_GATE — default OFF): a razão
+      // acima continua válida para o `next dev` cru SEM warmup (goto lento a
+      // compilar on-demand = falso negativo). A otimização reutiliza o MESMO
+      // `ensurePreview` (preview-manager.ts, modo C1.4) do rascunho-ao-vivo,
+      // mas paga a compilação ANTES do gate (prepararGateLocal faz 2 hits por
+      // rota) — o gate corre então contra um dev server já quente. O deploy
+      // Vercel real só acontece 1x, no sucesso (bloco 6d) — poupa N-1 deploys
+      // por ordem. Com a flag OFF, o ramo `else` reproduz a sequência EXATA
+      // de antes (runlog → tDeploy0 → discoverRoutes → waitForPreviewDeploy)
+      // — byte-a-byte idêntico ao anterior; só há a variável extra `gateBase`
+      // (= deploy.url) para os 3 gates a seguir lerem de um único sítio.
+      let tDeploy0: number;
+      let rotasSmoke: string[];
+      let deploy: { url: string; deployId: string } | null = null;
+      let gateBase: string;
+      if (CONFIG.LOCAL_GATE) {
+        tDeploy0 = Date.now();
+        rotasSmoke = await discoverRoutes(worktree).catch(() => ["/"]);
+        try {
+          gateBase = await prepararGateLocal(app.slug, branch, worktree, rotasSmoke);
+          await runlog(order.id, "deploy", `gate local pronto · ${gateBase}`);
+        } catch (e) {
+          // FALLBACK HONESTO: o dev server local não arrancou (ex.: porta
+          // esgotada, node_modules a meio) — cai no caminho Vercel só NESTA
+          // iteração; não desativa a flag para o resto da ordem.
+          await runlog(order.id, "stderr", `gate local falhou (${e instanceof Error ? e.message.slice(0, 160) : String(e)}) — fallback p/ deploy Vercel nesta iteração`);
+          await runlog(order.id, "deploy", `poll vercel · branch=${branch}`);
+          deploy = await waitForPreviewDeploy(app.vercel_project_id, branch, sha);
+          nDeploys++;
+          gateBase = deploy.url;
+        }
+      } else {
+        await runlog(order.id, "deploy", `poll vercel · branch=${branch}`);
+        tDeploy0 = Date.now();
+        rotasSmoke = await discoverRoutes(worktree).catch(() => ["/"]);
+        deploy = await waitForPreviewDeploy(app.vercel_project_id, branch, sha);
+        nDeploys++;
+        gateBase = deploy.url;
+      }
       const deployMs = Date.now() - tDeploy0;
-      const smokeLocal: import("./smoke.js").SmokeReport | null = null; // smoke corre a seguir contra o deploy
-      await runlog(order.id, "deploy", `READY · ${deploy.url}`);
-      // Deploy publicado e READY → é um candidato entregável mesmo que um gate
-      // posterior falhe. Guardamo-lo para a entrega-degradada (ver esgotamento).
-      ultimoDeployBom = { url: deploy.url, deployId: deploy.deployId };
+      const smokeLocal: import("./smoke.js").SmokeReport | null = null; // smoke corre a seguir contra o gate (deploy OU dev server local)
+      if (deploy) {
+        await runlog(order.id, "deploy", `READY · ${deploy.url}`);
+        // Deploy publicado e READY → é um candidato entregável mesmo que um gate
+        // posterior falhe. Guardamo-lo para a entrega-degradada (ver esgotamento).
+        // NOTA (LOCAL_GATE ON + sucesso do gate local): `deploy` fica null aqui
+        // e só é preenchido depois no deploy-único (bloco 6d) — não há deploy
+        // a meio para guardar.
+        ultimoDeployBom = { url: deploy.url, deployId: deploy.deployId };
+      }
 
       // --- (6a) Quality gate HTTP link check ---
       await log(order.app_id, order.id, order.user_id, "agente", "atividade", "A verificar se tudo funciona…");
-      await runlog(order.id, "info", `quality gate iter${iter} · ${deploy.url}`);
+      await runlog(order.id, "info", `quality gate iter${iter} · ${gateBase}`);
       const tGate0 = Date.now();
-      const quality = await checkQuality(deploy.url, rotasSmoke);
+      // Timeout maior no gate local (30s): o dev server pode ainda estar a
+      // compilar on-demand uma rota que o warmup não cobriu (ex.: descoberta
+      // por navegação, não pela lista estática de rotas). Com a flag OFF,
+      // `undefined` mantém o default 8000 do quality.ts — idêntico ao atual.
+      const quality = await checkQuality(gateBase, rotasSmoke, CONFIG.LOCAL_GATE ? 30000 : undefined);
       // Vídeos YouTube: verifica os IDs no CÓDIGO-FONTE (data.ts/componentes),
       // onde vivem mesmo quando renderizados client-side (não estão no HTML).
       const videos = await verificarVideos(worktree);
@@ -496,7 +638,10 @@ Fio condutor: precisão e honestidade acima de velocidade. "Feito, ficou bom" é
         const nx = await nextEstrategia(order.id, lastError);
         currentEstrategia = nx.estrategia;
         if (nx.esgotada) {
-          if (ultimoDeployBom) { await entregarDegradado(order, ultimoDeployBom, lastError ?? "gate esgotado"); return; }
+          const viaFallback = !ultimoDeployBom && CONFIG.LOCAL_GATE && !!ultimoSha;
+          const dep = ultimoDeployBom ?? (viaFallback ? await deployAtualOuNull(app, branch, worktree, ultimoSha as string) : null);
+          if (viaFallback && dep) nDeploys++;
+          if (dep) { await entregarDegradado(order, dep, lastError ?? "gate esgotado"); return; }
           throw new Error(esgotadaHumana(lastError));
         }
         continue;
@@ -504,8 +649,8 @@ Fio condutor: precisão e honestidade acima de velocidade. "Feito, ficou bom" é
 
       // --- (6b) Smoke Playwright — clique em botões, verifica consola ---
       // Smoke contra o DEPLOY (fiável). C5-revisto: sem dev-server local no gate.
-      await runlog(order.id, "info", `smoke playwright · ${deploy.url} · rotas: ${rotasSmoke.join(", ")}`);
-      const smoke: import("./smoke.js").SmokeReport | null = await smokeTest(deploy.url, rotasSmoke).catch((e) => {
+      await runlog(order.id, "info", `smoke playwright · ${gateBase} · rotas: ${rotasSmoke.join(", ")}`);
+      const smoke: import("./smoke.js").SmokeReport | null = await smokeTest(gateBase, rotasSmoke).catch((e) => {
         console.warn(`[${order.id.slice(0, 8)}] smoke skip:`, e.message);
         return null;
       });
@@ -528,7 +673,7 @@ Fio condutor: precisão e honestidade acima de velocidade. "Feito, ficou bom" é
         if (criterios.length > 0) {
           // rotasSmoke = rotas reais da app; o validador aceita a feature em
           // QUALQUER rota (não só na atribuída pelo LLM, que tende a ser "/").
-          const val = await validarAceitacao(deploy.url, criterios, order.id, rotasSmoke, CONFIG.ANTHROPIC_API_KEY);
+          const val = await validarAceitacao(gateBase, criterios, order.id, rotasSmoke, CONFIG.ANTHROPIC_API_KEY);
           if (!val.ok) {
             lastError = `página incompleta: ${val.falhas.slice(0, 3).join("; ")}`;
             lastDetalhe = JSON.stringify({ criteriosFalhados: val.falhas }, null, 1); // C6.9
@@ -537,7 +682,10 @@ Fio condutor: precisão e honestidade acima de velocidade. "Feito, ficou bom" é
             const nx = await nextEstrategia(order.id, lastError);
             currentEstrategia = nx.estrategia;
             if (nx.esgotada) {
-          if (ultimoDeployBom) { await entregarDegradado(order, ultimoDeployBom, lastError ?? "gate esgotado"); return; }
+          const viaFallback = !ultimoDeployBom && CONFIG.LOCAL_GATE && !!ultimoSha;
+          const dep = ultimoDeployBom ?? (viaFallback ? await deployAtualOuNull(app, branch, worktree, ultimoSha as string) : null);
+          if (viaFallback && dep) nDeploys++;
+          if (dep) { await entregarDegradado(order, dep, lastError ?? "gate esgotado"); return; }
           throw new Error(esgotadaHumana(lastError));
         }
             continue;
@@ -594,7 +742,10 @@ Fio condutor: precisão e honestidade acima de velocidade. "Feito, ficou bom" é
           const nx = await nextEstrategia(order.id, lastError);
           currentEstrategia = nx.estrategia;
           if (nx.esgotada) {
-          if (ultimoDeployBom) { await entregarDegradado(order, ultimoDeployBom, lastError ?? "gate esgotado"); return; }
+          const viaFallback = !ultimoDeployBom && CONFIG.LOCAL_GATE && !!ultimoSha;
+          const dep = ultimoDeployBom ?? (viaFallback ? await deployAtualOuNull(app, branch, worktree, ultimoSha as string) : null);
+          if (viaFallback && dep) nDeploys++;
+          if (dep) { await entregarDegradado(order, dep, lastError ?? "gate esgotado"); return; }
           throw new Error(esgotadaHumana(lastError));
         }
           continue;
@@ -621,6 +772,46 @@ Fio condutor: precisão e honestidade acima de velocidade. "Feito, ficou bom" é
           });
         }
       }
+
+      // --- (6d) DEPLOY ÚNICO (LOCAL_GATE, flag ON apenas) ---
+      // Todos os gates (quality/vídeos/aceitação/smoke) já passaram contra o
+      // dev server LOCAL. A ÚNICA coisa que isso não prova é que o BUILD DE
+      // PRODUÇÃO (`next build`, que o Vercel corre) também compila — por
+      // isso só AGORA, 1x por sucesso, se publica de facto no Vercel. Com a
+      // flag OFF (ou quando o fallback da secção (5) já fez um deploy real
+      // nesta iteração), `deploy` já não é null e este bloco é no-op.
+      if (CONFIG.LOCAL_GATE && !deploy) {
+        await log(order.app_id, order.id, order.user_id, "agente", "atividade", "A publicar a versão final…");
+        await runlog(order.id, "deploy", `deploy único · push + poll vercel · branch=${branch}`);
+        await push(worktree, branch);
+        try {
+          deploy = await waitForPreviewDeploy(app.vercel_project_id, branch, sha);
+          nDeploys++;
+          ultimoDeployBom = { url: deploy.url, deployId: deploy.deployId };
+          await runlog(order.id, "deploy", `READY · ${deploy.url}`);
+        } catch (e) {
+          // Build de produção falhou — é a única falha que o gate local não
+          // consegue apanhar de antemão. Trata-se como qualquer outra falha
+          // de gate: escala estratégia via loop-detector. NÃO tenta
+          // deployAtualOuNull aqui — acabámos de tentar exatamente isso.
+          lastError = `build de produção falhou: ${e instanceof Error ? e.message.slice(0, 160) : String(e)}`;
+          lastDetalhe = null; // sem relatório por-elemento — não há um (C6.9 seria enganador)
+          await runlog(order.id, "stderr", lastError);
+          const nx = await nextEstrategia(order.id, lastError);
+          currentEstrategia = nx.estrategia;
+          if (nx.esgotada) {
+            if (ultimoDeployBom) { await entregarDegradado(order, ultimoDeployBom, lastError ?? "gate esgotado"); return; }
+            throw new Error(esgotadaHumana(lastError));
+          }
+          continue;
+        }
+      }
+      // Guarda de tipo (runtime + TS): a partir daqui `deploy` é sempre
+      // não-nulo — ou veio da secção (5) (flag OFF / fallback), ou foi
+      // publicado agora mesmo acima. Nunca deveria disparar; existe para
+      // sermos honestos em vez de deixar o TS assumir e o runtime rebentar
+      // num `deploy.url` mais abaixo.
+      if (!deploy) throw new Error("deploy inesperadamente nulo após o gate (bug interno do gate local)");
 
       // --- (7) Sucesso ---
       plano = step(plano, "p4", "feito");
@@ -663,6 +854,11 @@ Fio condutor: precisão e honestidade acima de velocidade. "Feito, ficou bom" é
         total_s: Math.round((Date.now() - t0) / 1000),
         iteracoes: iter,
         smoke_local: smokeLocal !== null,
+        // 3f (2026-07-12): local_gate diz se esta ordem correu com a
+        // otimização; deploys conta quantos deploys Vercel REAIS aconteceram
+        // (objetivo do gate local: tender para 1, vs. 1-por-iteração antes).
+        local_gate: CONFIG.LOCAL_GATE,
+        deploys: nDeploys,
       });
       console.log(`[${order.id.slice(0, 8)}] preview_pronto em ${Date.now() - t0}ms · iter=${iter} · ${deploy.url}`);
 

@@ -65,4 +65,17 @@ export const CONFIG = {
   DEEP_BUDGET_MS: Number(process.env.STUDIO_DEEP_BUDGET_MS ?? String(4 * 60 * 60 * 1000)), // 4h
   DEEP_MAX_MILESTONES: Number(process.env.STUDIO_DEEP_MAX_MILESTONES ?? "24"),
   DEEP_MAX_FIX_ROUNDS: Number(process.env.STUDIO_DEEP_MAX_FIX_ROUNDS ?? "4"), // loop implement↔verify por milestone
+
+  // --- GATE LOCAL + DEPLOY-ÚNICO (2026-07-12) ---
+  // ATIVO só quando STUDIO_LOCAL_GATE=1 (default OFF — regra de ouro: com a
+  // flag OFF, process.ts corre o caminho `else` byte-a-byte, idêntico ao
+  // comportamento anterior a esta mudança). Quando ON, os gates de qualidade
+  // (checkQuality/smokeTest/validarAceitacao) correm contra o `next dev` do
+  // worktree (preview-manager.ts, modo C1.4) em vez de um deploy Vercel por
+  // iteração — só há UM deploy real, no sucesso (prova o build de produção).
+  LOCAL_GATE: process.env.STUDIO_LOCAL_GATE === "1",
+  // Tempo máximo (ms) do warmup por rota antes do gate correr — paga a
+  // compilação on-demand do Next dev para o gate não apanhar um falso
+  // negativo por timeout de compilação a meio do primeiro pedido.
+  LOCAL_GATE_WARMUP_MS: Number(process.env.STUDIO_LOCAL_WARMUP_MS ?? "90000"),
 };
