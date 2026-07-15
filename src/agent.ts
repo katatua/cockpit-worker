@@ -283,8 +283,13 @@ export async function runAgent(input: AgentInput): Promise<AgentRun> {
       const u = ((m as { usage?: Record<string, number>; total_usage?: Record<string, number> }).usage
         ?? (m as { total_usage?: Record<string, number> }).total_usage
         ?? {}) as Record<string, number>;
-      tokensUsed = (u.input_tokens ?? 0) + (u.output_tokens ?? 0)
+      // A `usage` do result é CUMULATIVA por run. O SDK pode emitir um 2.º
+      // result (error_during_execution, usage vazia) depois do result:success —
+      // com `=` isso ESMAGAVA o valor real para ~0 (causa do sub-count: relatorios
+      // 1.9M vs cobranca 16.4M com MAIS milestones). Ficamos com o pico.
+      const usageAgora = (u.input_tokens ?? 0) + (u.output_tokens ?? 0)
         + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+      tokensUsed = Math.max(tokensUsed, usageAgora);
     }
     // Brief §1: sem teto de tokens. Kill-switch do dono corta processos novos.
   }

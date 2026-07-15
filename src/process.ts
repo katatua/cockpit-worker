@@ -982,6 +982,24 @@ async function entregarDegradado(
 
 async function fail(order: OrderRow, motivo: string) {
   console.error(`[${order.id.slice(0, 8)}] falhou: ${motivo}`);
+  // P0 (2026-07-15): se JÁ existe um preview deployado (o deep-build deploya
+  // incrementalmente por milestone), um "falhou" por estouro de budget/timeout
+  // é MENTIRA nos dados — o app está no ar. Entrega como preview_pronto com nota
+  // honesta de que estourou o tempo, em vez de marcar falhou. Só reclassifica
+  // quando há preview real E o motivo é tempo/budget (não quando não há nada).
+  if (/aborted by user|demorou muito|timeout|budget|orçament/i.test(motivo)) {
+    const { data: cur } = await supabase.from("studio_orders")
+      .select("preview_url, preview_deploy_id").eq("id", order.id).maybeSingle();
+    if (cur?.preview_url) {
+      await supabase.from("studio_orders").update({ estado: "preview_pronto", erro: null }).eq("id", order.id);
+      await log(order.app_id, order.id, order.user_id, "agente", "texto",
+        "Publiquei a versão que está a funcionar — já a podes abrir. Levou mais tempo do que o previsto e parei para não gastar a mais; " +
+        "não deitei fora o trabalho. Se faltar afinar algo, diz-me e continuo daqui (não recomeço do zero).");
+      await event(order.app_id, order.id, order.user_id, "worker.entregue_apos_budget", { url: cur.preview_url, motivo });
+      await runlog(order.id, "info", `entregue apos budget (nao falhou): ${motivo}`);
+      return;
+    }
+  }
   // Traduz mensagens técnicas para humano quando dá para reconhecer.
   const humano = motivo.startsWith("Tentei várias abordagens") ? motivo
     : /aborted by user|demorou muito|timeout/i.test(motivo) ? "A demorar demasiado — parei para não gastar mais. Tenta reformular o pedido ou dividi-lo em pedaços mais pequenos."
