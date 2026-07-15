@@ -42,9 +42,9 @@ JSON-LD gerado com `"url":"http://localhost:3000"` em vez do domínio de produç
 ---
 
 ## Fixes priorizados (para o backlog do Studio)
-**P0 — Instrumentação (sem isto, otimizar às cegas)**
-1. Corrigir `tokens_usados`: somar **todas** as chamadas LLM (arquiteto+implementador+verificador) e persistir mesmo quando a guarda mata o processo. Idealmente gravar tokens **por milestone** (input/output separados) num `studio_events tipo='deep.tokens'`.
-2. Corrigir o estado terminal: se um preview foi deployado (200), estado = `preview_pronto` (com flag `overran_budget=true`), **não** `falhou`. Não envenenar os logs.
+**P0 — Instrumentação — ✅ FEITO E DEPLOYADO (commit `cedac69`, 2026-07-15)**
+1. ✅ `agent.ts`: causa do sub-count era o `=` a esmagar a `usage` do result quando o SDK emite um 2.º result (error_during_execution) vazio. Passou a `Math.max` (mantém o pico cumulativo por run). *(Melhoria futura: gravar tokens por milestone num `deep.tokens` event.)*
+2. ✅ `process.ts fail()`: se já há preview deployado e o motivo é tempo/budget, entrega como `preview_pronto` + event `worker.entregue_apos_budget`, em vez de `falhou`. Deixa de envenenar os logs. *(As 6 apps já concluídas antes do deploy ficam com o `falhou` histórico; da 7.ª em diante fica correto.)*
 
 **P1 — Tempo (o driver é o nº de milestones × build repetido)**
 3. **Estabilizar a decomposição**: teto de milestones por app (ex. 5–6) e planeador mais determinístico — 70 min (6 milestones) vs 151 min (10) para apps equivalentes é variância pura.
